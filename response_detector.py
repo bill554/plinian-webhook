@@ -454,9 +454,9 @@ def start_webhook_server(port: int = 5000) -> None:
             return jsonify({"status": "error", "message": str(e)}), 500
 
     # /webhook/outreach --------------------------------------------------------
-    @app.route("/webhook/outreach", methods=["POST"])
-    def outreach_webhook():
-        try:
+@app.route("/webhook/outreach", methods=["POST"])
+def outreach_webhook():
+    try:
         raw_body = request.get_data(as_text=True)
         logger.info(f"[NOTION RAW PAYLOAD] {raw_body}")
 
