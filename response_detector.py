@@ -456,6 +456,11 @@ def start_webhook_server(port: int = 5000) -> None:
     # /webhook/outreach --------------------------------------------------------
     @app.route("/webhook/outreach", methods=["POST"])
     def outreach_webhook():
+        try:
+        raw_body = request.get_data(as_text=True)
+        logger.info(f"[NOTION RAW PAYLOAD] {raw_body}")
+
+        data = request.get_json(silent=True) or {}
         """
         Triggered by a Notion Button ("Send Webhook") from the Prospect Firms database.
         """
