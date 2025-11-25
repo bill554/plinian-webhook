@@ -404,8 +404,6 @@ def update_firm_page_with_outreach(
 
     notion.pages.update(page_id=firm_id, properties=updates)
     logger.info(f"Updated firm page {firm_id} with outreach info: {updates}")
-
-
 # =============================================================================
 # WEBHOOK SERVER (Flask)
 # =============================================================================
@@ -449,6 +447,7 @@ def start_webhook_server(port: int = 5000) -> None:
                 received_date=received_date,
             )
             return jsonify(result), 200
+
         except Exception as e:
             logger.error(f"Webhook error (/webhook/email-reply): {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
@@ -456,24 +455,23 @@ def start_webhook_server(port: int = 5000) -> None:
     # /webhook/outreach --------------------------------------------------------
     @app.route("/webhook/outreach", methods=["POST"])
     def outreach_webhook():
+        """
+        Triggered by a Notion Button from the Prospect Firms database.
+        Supports both:
+          - manual curl JSON (firm_id, firm_name, fit, website)
+          - Notion property-based JSON (Page ID, Firm Name, Plinian Fit, Website)
+        """
         try:
             raw_body = request.get_data(as_text=True)
             logger.info(f"[NOTION RAW PAYLOAD] {raw_body}")
 
             data = request.get_json(silent=True) or {}
-        """
-        Triggered by a Notion Button ("Send Webhook") from the Prospect Firms database.
-        """
-        try:
-            raw_body = request.get_data(as_text=True)
-            logger.info(f"Raw outreach request body: {raw_body}")
 
-            data = request.get_json(silent=True) or {}
-
-            firm_id = data.get("firm_id")
-            firm_name_from_payload = data.get("firm_name")
-            fit = data.get("fit")
-            website_from_payload = data.get("website")
+            # Accept both styles: manual & Notion property names
+            firm_id = data.get("firm_id") or data.get("Page ID")
+            firm_name_from_payload = data.get("firm_name") or data.get("Firm Name")
+            fit = data.get("fit") or data.get("Plinian Fit")
+            website_from_payload = data.get("website") or data.get("Website")
 
             if not firm_id:
                 return jsonify(
@@ -491,9 +489,16 @@ def start_webhook_server(port: int = 5000) -> None:
                 f"website={website_from_payload}"
             )
 
+            # 1) Load firm details from Notion
             firm = get_firm_details_from_notion(firm_id)
+
+            # 2) Generate outreach (stub or LLM-driven)
             outreach = generate_outreach_for_firm(firm)
+
+            # 3) Create Gmail drafts (stub for now)
             gmail_results = create_gmail_drafts_stub(outreach)
+
+            # 4) Update the firm page with outreach info
             update_firm_page_with_outreach(firm, outreach, gmail_results)
 
             return jsonify(
@@ -524,6 +529,7 @@ def start_webhook_server(port: int = 5000) -> None:
     # Start server -------------------------------------------------------------
     logger.info(f"Starting webhook server on port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
 # =============================================================================
