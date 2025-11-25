@@ -453,76 +453,73 @@ def start_webhook_server(port: int = 5000) -> None:
             logger.error(f"Webhook error (/webhook/email-reply): {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
 
-# -----------------------------
-# /webhook/outreach (Prospect Firms button)
-# -----------------------------
-@app.route("/webhook/outreach", methods=["POST"])
-def outreach_webhook():
-    try:
-        raw_body = request.get_data(as_text=True)
-        logger.info(f"[NOTION RAW PAYLOAD] {raw_body}")
+    # /webhook/outreach --------------------------------------------------------
+    @app.route("/webhook/outreach", methods=["POST"])
+    def outreach_webhook():
+        try:
+            raw_body = request.get_data(as_text=True)
+            logger.info(f"[NOTION RAW PAYLOAD] {raw_body}")
 
-        data = request.get_json(silent=True) or {}
+            data = request.get_json(silent=True) or {}
+        """
+        Triggered by a Notion Button ("Send Webhook") from the Prospect Firms database.
+        """
+        try:
+            raw_body = request.get_data(as_text=True)
+            logger.info(f"Raw outreach request body: {raw_body}")
 
-        firm_id = data.get("firm_id") or data.get("Page ID")
-        firm_name_from_payload = data.get("firm_name") or data.get("Firm Name")
-        fit = data.get("fit") or data.get("Plinian Fit")
-        website_from_payload = data.get("website") or data.get("Website")
+            data = request.get_json(silent=True) or {}
 
-        if not firm_id:
-            return jsonify({
-                "status": "error",
-                "message": "Missing required field: firm_id",
-                "raw_body": raw_body,
-                "parsed_data": data
-            }), 400
+            firm_id = data.get("firm_id")
+            firm_name_from_payload = data.get("firm_name")
+            fit = data.get("fit")
+            website_from_payload = data.get("website")
 
-        logger.info(
-            f"[Outreach Trigger] firm_id={firm_id}, "
-            f"firm_name={firm_name_from_payload}, fit={fit}, website={website_from_payload}"
-        )
+            if not firm_id:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "message": "Missing required field: firm_id",
+                        "raw_body": raw_body,
+                        "parsed_data": data,
+                    }
+                ), 400
 
-        # 1) Load firm details
-        firm = get_firm_details_from_notion(firm_id)
+            logger.info(
+                f"[Outreach Trigger] firm_id={firm_id}, "
+                f"firm_name={firm_name_from_payload}, fit={fit}, "
+                f"website={website_from_payload}"
+            )
 
-        # 2) Generate outreach (stub or LLM)
-        outreach = generate_outreach_for_firm(firm)
+            firm = get_firm_details_from_notion(firm_id)
+            outreach = generate_outreach_for_firm(firm)
+            gmail_results = create_gmail_drafts_stub(outreach)
+            update_firm_page_with_outreach(firm, outreach, gmail_results)
 
-        # 3) Create Gmail drafts (stub)
-        gmail_results = create_gmail_drafts_stub(outreach)
+            return jsonify(
+                {
+                    "status": "ok",
+                    "message": "Outreach workflow completed (stub drafts)",
+                    "firm": {
+                        "firm_id": firm.get("firm_id"),
+                        "firm_name": firm.get("firm_name"),
+                        "website": firm.get("website"),
+                        "plinian_fit": firm.get("plinian_fit"),
+                    },
+                    "outreach": outreach,
+                    "gmail_results": gmail_results,
+                }
+            ), 200
 
-        # 4) Update the firm page in Notion
-        update_firm_page_with_outreach(firm, outreach, gmail_results)
+        except Exception as e:
+            logger.error(f"Outreach webhook error (/webhook/outreach): {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
 
-        return jsonify({
-            "status": "ok",
-            "message": "Outreach workflow completed (stub drafts)",
-            "firm": {
-                "firm_id": firm.get("firm_id"),
-                "firm_name": firm.get("firm_name"),
-                "website": firm.get("website"),
-                "plinian_fit": firm.get("plinian_fit")
-            },
-            "outreach": outreach,
-            "gmail_results": gmail_results
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Outreach webhook error (/webhook/outreach): {e}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
-
-# -----------------------------
-# /health
-# -----------------------------
-@app.route("/health", methods=["GET"])
-def health_check():
-    logger.info("🚑 /health endpoint hit")
-    return jsonify({"status": "healthy"}), 200
-
+    # /health ------------------------------------------------------------------
+    @app.route("/health", methods=["GET"])
+    def health_check():
+        logger.info("🚑 /health endpoint hit")
+        return jsonify({"status": "healthy"}), 200
 
     # Start server -------------------------------------------------------------
     logger.info(f"Starting webhook server on port {port}...")
