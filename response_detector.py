@@ -453,13 +453,29 @@ def start_webhook_server(port: int = 5000) -> None:
             return jsonify({"status": "error", "message": str(e)}), 500
 
     # /webhook/outreach --------------------------------------------------------
+    # /webhook/outreach --------------------------------------------------------
     @app.route("/webhook/outreach", methods=["POST"])
     def outreach_webhook():
         """
         Triggered by a Notion Button from the Prospect Firms database.
-        Supports both:
-          - manual curl JSON (firm_id, firm_name, fit, website)
-          - Notion property-based JSON (Page ID, Firm Name, Plinian Fit, Website)
+
+        Supports:
+          1) Manual curl JSON:
+             {"firm_id": "...", "firm_name": "...", "fit": "...", "website": "..."}
+
+          2) Notion automation JSON:
+             {
+               "source": {...},
+               "data": {
+                 "id": "<page_id>",
+                 "properties": {
+                   "Firm Name": {...},
+                   "Website": {"url": "..."},
+                   "Page ID": {"formula": {"string": "<page_id>"}},
+                   ...
+                 }
+               }
+             }
         """
         try:
             raw_body = request.get_data(as_text=True)
@@ -467,11 +483,50 @@ def start_webhook_server(port: int = 5000) -> None:
 
             data = request.get_json(silent=True) or {}
 
-            # Accept both styles: manual & Notion property names
-            firm_id = data.get("firm_id") or data.get("Page ID")
-            firm_name_from_payload = data.get("firm_name") or data.get("Firm Name")
-            fit = data.get("fit") or data.get("Plinian Fit")
-            website_from_payload = data.get("website") or data.get("Website")
+            firm_id = None
+            firm_name_from_payload = None
+            fit = None
+            website_from_payload = None
+
+            # Case 1: Notion automation envelope { "source": ..., "data": {page...} }
+            page_obj = data.get("data")
+            if isinstance(page_obj, dict):
+                props = page_obj.get("properties", {}) or {}
+
+                # Prefer the Page ID formula if present
+                page_id_formula = (
+                    props.get("Page ID", {})
+                    .get("formula", {})
+                    .get("string")
+                )
+                firm_id = page_id_formula or page_obj.get("id")
+
+                # Firm Name from title
+                title_items = (
+                    props.get("Firm Name", {})
+                    .get("type") == "title" and
+                    props.get("Firm Name", {}).get("title") or []
+                )
+                firm_name_from_payload = "".join(
+                    part.get("plain_text", "") for part in title_items
+                ) or None
+
+                # Website
+                website_from_payload = (
+                    props.get("Website", {}).get("url")
+                )
+
+                # Optional: choose a "fit" field if you want (e.g. Co-Invests Fit)
+                fit_prop = props.get("Co-Invests Fit") or props.get("Ashton Gray Fit")
+                if fit_prop and fit_prop.get("select"):
+                    fit = fit_prop["select"]["name"]
+
+            else:
+                # Case 2: simple JSON (manual curl, etc.)
+                firm_id = data.get("firm_id") or data.get("Page ID")
+                firm_name_from_payload = data.get("firm_name") or data.get("Firm Name")
+                fit = data.get("fit") or data.get("Plinian Fit")
+                website_from_payload = data.get("website") or data.get("Website")
 
             if not firm_id:
                 return jsonify(
@@ -519,6 +574,7 @@ def start_webhook_server(port: int = 5000) -> None:
         except Exception as e:
             logger.error(f"Outreach webhook error (/webhook/outreach): {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
+
 
     # /health ------------------------------------------------------------------
     @app.route("/health", methods=["GET"])
