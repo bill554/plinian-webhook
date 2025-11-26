@@ -384,7 +384,7 @@ def get_gmail_service():
         return None
 
 
-def create_gmail_draft(outreach: Dict[str, Any]) -> Dict[str, Any]:
+def create_gmail_draft(outreach: Dict[str, Any], firm_name: str = "") -> Dict[str, Any]:
     """Create a real Gmail draft from LLM-generated outreach."""
     subject = outreach.get("subject", "Plinian Strategies - Introduction")
     body = outreach.get("body", "")
@@ -401,6 +401,12 @@ def create_gmail_draft(outreach: Dict[str, Any]) -> Dict[str, Any]:
 
     message = MIMEText(body)
     message["subject"] = subject
+    
+    # Add placeholder recipient with firm name so Bill knows who it's for
+    if firm_name:
+        # Format: "[Company Name]" <placeholder@example.com>
+        safe_name = firm_name.replace('"', "'")
+        message["to"] = f'"[{safe_name}]" <recipient@placeholder.com>'
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
@@ -416,9 +422,11 @@ def create_gmail_draft(outreach: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         draft_id = created.get("id")
-        gmail_url = f"https://mail.google.com/mail/u/0/#drafts?compose={draft_id}"
+        # Use the message ID for the URL - this opens the actual draft
+        message_id = created.get("message", {}).get("id", draft_id)
+        gmail_url = f"https://mail.google.com/mail/u/0/#drafts/{message_id}"
 
-        logger.info(f"✅ Gmail draft created: {draft_id}")
+        logger.info(f"✅ Gmail draft created: {draft_id} (message: {message_id})")
         
         return {
             "gmail_draft_id": draft_id,
@@ -532,6 +540,7 @@ def outreach_webhook():
             "status": "error",
             "message": "Missing required field: firm_id (or data.id for Notion webhooks)"
         }), 400
+
     try:
         # 1. Load firm details from Notion
         logger.info(f"📥 Loading firm details for {firm_id}...")
@@ -546,7 +555,7 @@ def outreach_webhook():
 
         # 3. Create Gmail draft
         logger.info("📧 Creating Gmail draft...")
-        gmail_result = create_gmail_draft(outreach)
+        gmail_result = create_gmail_draft(outreach, firm_name=firm.get("firm_name", ""))
 
         # 4. Update firm page in Notion
         logger.info("📝 Updating firm page with outreach info...")
