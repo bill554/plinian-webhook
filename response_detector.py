@@ -422,11 +422,13 @@ def create_gmail_draft(outreach: Dict[str, Any], firm_name: str = "") -> Dict[st
         )
 
         draft_id = created.get("id")
-        # Use the message ID for the URL - this opens the actual draft
-        message_id = created.get("message", {}).get("id", draft_id)
-        gmail_url = f"https://mail.google.com/mail/u/0/#drafts/{message_id}"
+        message_id = created.get("message", {}).get("id", "")
+        thread_id = created.get("message", {}).get("threadId", "")
+        
+        # Try thread ID format - some users report this works
+        gmail_url = f"https://mail.google.com/mail/u/0/#drafts?compose={thread_id}"
 
-        logger.info(f"✅ Gmail draft created: {draft_id} (message: {message_id})")
+        logger.info(f"✅ Gmail draft created - draft_id: {draft_id}, message_id: {message_id}, thread_id: {thread_id}")
         
         return {
             "gmail_draft_id": draft_id,
