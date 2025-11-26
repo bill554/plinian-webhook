@@ -422,13 +422,10 @@ def create_gmail_draft(outreach: Dict[str, Any], firm_name: str = "") -> Dict[st
         )
 
         draft_id = created.get("id")
-        message_id = created.get("message", {}).get("id", "")
-        thread_id = created.get("message", {}).get("threadId", "")
-        
-        # Try thread ID format - some users report this works
-        gmail_url = f"https://mail.google.com/mail/u/0/#drafts?compose={thread_id}"
+        # Link to drafts folder - direct draft links don't work reliably
+        gmail_url = f"https://mail.google.com/mail/u/0/#drafts"
 
-        logger.info(f"✅ Gmail draft created - draft_id: {draft_id}, message_id: {message_id}, thread_id: {thread_id}")
+        logger.info(f"✅ Gmail draft created: {draft_id}")
         
         return {
             "gmail_draft_id": draft_id,
