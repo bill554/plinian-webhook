@@ -508,21 +508,30 @@ def outreach_webhook():
     """
     Main outreach webhook endpoint.
     Receives a firm_id and executes the full outreach workflow.
+    
+    Accepts two payload formats:
+    1. Simple: {"firm_id": "xxx"}
+    2. Notion native: {"data": {"id": "xxx", ...}, "source": {...}}
     """
     logger.info("🚨 /webhook/outreach endpoint was hit")
 
     data = request.get_json() or {}
-    firm_id = data.get("firm_id")
-
     logger.info(f"📬 Payload received: {data}")
+
+    # Handle both simple and Notion native payload formats
+    firm_id = data.get("firm_id")
+    
+    # If no direct firm_id, check for Notion's native webhook format
+    if not firm_id and "data" in data:
+        firm_id = data.get("data", {}).get("id")
+        logger.info(f"📋 Extracted firm_id from Notion payload: {firm_id}")
 
     if not firm_id:
         logger.error("❌ Missing firm_id in payload")
         return jsonify({
             "status": "error",
-            "message": "Missing required field: firm_id"
+            "message": "Missing required field: firm_id (or data.id for Notion webhooks)"
         }), 400
-
     try:
         # 1. Load firm details from Notion
         logger.info(f"📥 Loading firm details for {firm_id}...")
