@@ -1,42 +1,38 @@
 """
 Plinian Strategies — Email Response & Outreach Webhook
 ======================================================
+Railway-compatible version with gunicorn support.
 
-Part 1: Email Response Detector
--------------------------------
-Detects email replies and updates Outreach Log entries in Notion.
-
-Part 2: Outreach Trigger (Prospect Firms → Outreach Draft)
-----------------------------------------------------------
-Accepts webhook calls from Notion (e.g., button in Prospect Firms database)
-to kick off an outreach workflow:
-
-    Notion Button → /webhook/outreach → Notion Read
-        → LLM-Powered Outreach Draft
-        → Gmail Draft
-        → Notion Update
-
-Setup:
-    pip install notion-client python-dotenv flask anthropic
-    pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+Endpoints:
+    POST /webhook/outreach     - Trigger LLM-powered outreach for a firm
+    POST /webhook/email-reply  - Process email reply
+    GET  /health               - Health check
 
 Environment Variables:
-    NOTION_API_KEY      - Your Notion integration token
-    OUTREACH_LOG_DB_ID  - Outreach Log database ID (for email replies)
-    ANTHROPIC_API_KEY   - Anthropic API key for LLM outreach generation
-
-    GMAIL_TOKEN_PATH        - Path to Gmail OAuth token file (default: token.json)
-    GMAIL_CREDENTIALS_PATH  - Path to Gmail client secrets (default: credentials.json)
+    NOTION_API_KEY        - Your Notion integration token
+    ANTHROPIC_API_KEY     - Anthropic API key for LLM outreach generation
+    OUTREACH_LOG_DB_ID    - Outreach Log database ID (for email replies)
+    
+    # Gmail OAuth (choose one method):
+    # Method 1: File-based (local dev)
+    GMAIL_TOKEN_PATH          - Path to token.json (default: token.json)
+    GMAIL_CREDENTIALS_PATH    - Path to credentials.json (default: credentials.json)
+    
+    # Method 2: Environment-based (Railway/production)
+    GMAIL_TOKEN_JSON          - Full token.json contents as a string
+    GMAIL_CREDENTIALS_JSON    - Full credentials.json contents as a string
 """
 
 import os
 import sys
+import json
 import logging
 import base64
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from email.mime.text import MIMEText
 
+from flask import Flask, request, jsonify
 from notion_client import Client
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
@@ -56,8 +52,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-print("🚀 Response Detector script starting...")
-
 # =============================================================================
 # CONFIG & INITIALIZATION
 # =============================================================================
@@ -70,13 +64,21 @@ OUTREACH_LOG_DB_ID = os.environ.get(
     "2b5c16a0-949c-8147-8a7f-ca839e1ae002"
 )
 
-# Gmail configuration
+# Gmail configuration - supports both file-based and env-based tokens
 GMAIL_TOKEN_PATH = os.environ.get("GMAIL_TOKEN_PATH", "token.json")
 GMAIL_CREDENTIALS_PATH = os.environ.get("GMAIL_CREDENTIALS_PATH", "credentials.json")
+GMAIL_TOKEN_JSON = os.environ.get("GMAIL_TOKEN_JSON")  # For Railway
+GMAIL_CREDENTIALS_JSON = os.environ.get("GMAIL_CREDENTIALS_JSON")  # For Railway
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
 
 # Initialize Notion client
 notion = Client(auth=NOTION_API_KEY)
+
+# =============================================================================
+# FLASK APP (module-level for gunicorn)
+# =============================================================================
+
+app = Flask(__name__)
 
 
 # =============================================================================
@@ -261,14 +263,10 @@ def get_firm_details_from_notion(firm_id: str) -> Dict[str, Any]:
             return [opt["name"] for opt in prop["multi_select"]]
         return []
 
-    # Try multiple possible field names
     firm_name = get_title("Firm Name") or get_title("Name")
     website = get_url("Website")
-    
-    # Get fit tags from Best Matches or Plinian Fit
     plinian_fit = get_select_or_multi("Best Matches") or get_select_or_multi("Plinian Fit")
     
-    # Combine multiple note fields for richer context
     notes_parts = []
     for field in ["Qualification Notes", "Notes", "Key Investment Themes", "Network Angles", "Firm Overview"]:
         text = get_rich_text(field)
@@ -293,22 +291,7 @@ def get_firm_details_from_notion(firm_id: str) -> Dict[str, Any]:
 # =============================================================================
 
 def generate_outreach_for_firm(firm_data: dict) -> dict:
-    """
-    Generate personalized outreach email using Claude API.
-    
-    Args:
-        firm_data: Dict containing firm details from Notion
-            - firm_name: str
-            - website: str (optional)
-            - plinian_fit: list[str] (optional) 
-            - notes: str (optional)
-            - raw_page: dict (optional, full Notion page)
-            - contact_name: str (optional)
-            - contact_title: str (optional)
-    
-    Returns:
-        Dict with: subject, body, primary_client, reasoning, success, error
-    """
+    """Generate personalized outreach email using Claude API."""
     firm_name = firm_data.get("firm_name", "Unknown Firm")
     
     logger.info(f"Generating LLM outreach for: {firm_name}")
@@ -369,21 +352,29 @@ bill@plinian.co
 
 def get_gmail_service():
     """
-    Build an authenticated Gmail service using OAuth2 token + credentials.
+    Build an authenticated Gmail service.
+    Supports both file-based tokens (local) and env-based tokens (Railway).
     """
     try:
-        logger.info("⚙️ Starting Gmail service check...")
+        logger.info("⚙️ Building Gmail service...")
 
-        if not os.path.exists(GMAIL_TOKEN_PATH):
-            logger.error(f"❌ Gmail token not found at: {GMAIL_TOKEN_PATH}")
+        creds = None
+        
+        # Method 1: Environment variable (Railway/production)
+        if GMAIL_TOKEN_JSON:
+            logger.info("Using GMAIL_TOKEN_JSON from environment")
+            token_data = json.loads(GMAIL_TOKEN_JSON)
+            creds = Credentials.from_authorized_user_info(token_data, GMAIL_SCOPES)
+        
+        # Method 2: File-based (local development)
+        elif os.path.exists(GMAIL_TOKEN_PATH):
+            logger.info(f"Using token file: {GMAIL_TOKEN_PATH}")
+            creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
+        
+        else:
+            logger.error("❌ No Gmail credentials found (neither env var nor file)")
             return None
-        if not os.path.exists(GMAIL_CREDENTIALS_PATH):
-            logger.error(f"❌ Gmail credentials file not found at: {GMAIL_CREDENTIALS_PATH}")
-            return None
 
-        logger.info("✅ Gmail files exist — loading credentials...")
-
-        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
         service = build("gmail", "v1", credentials=creds)
         logger.info("✅ Gmail service built successfully.")
         return service
@@ -394,15 +385,7 @@ def get_gmail_service():
 
 
 def create_gmail_draft(outreach: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Create a real Gmail draft from LLM-generated outreach.
-
-    Args:
-        outreach: Dict with 'subject' and 'body' keys from LLM
-        
-    Returns:
-        Dict with gmail_draft_id, gmail_draft_url, success, error
-    """
+    """Create a real Gmail draft from LLM-generated outreach."""
     subject = outreach.get("subject", "Plinian Strategies - Introduction")
     body = outreach.get("body", "")
     
@@ -416,10 +399,8 @@ def create_gmail_draft(outreach: Dict[str, Any]) -> Dict[str, Any]:
             "error": "Gmail service not configured"
         }
 
-    # Build the email message
     message = MIMEText(body)
     message["subject"] = subject
-    # Leave "To:" blank — Bill will fill it in manually
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
@@ -461,14 +442,7 @@ def update_firm_page_with_outreach(
     outreach: Dict[str, Any],
     gmail_result: Dict[str, Any],
 ) -> None:
-    """
-    Update the Prospect Firm Notion page with outreach info.
-    
-    Args:
-        firm: Firm details dict (must contain firm_id)
-        outreach: LLM outreach result (subject, body, primary_client, etc.)
-        gmail_result: Gmail draft result (gmail_draft_url, etc.)
-    """
+    """Update the Prospect Firm Notion page with outreach info."""
     firm_id = firm.get("firm_id")
     if not firm_id:
         logger.warning("Cannot update firm page: missing firm_id")
@@ -486,31 +460,25 @@ def update_firm_page_with_outreach(
 
     updates: Dict[str, Any] = {}
 
-    # Update Relationship Stage to "Initial Outreach" if property exists
     if "Relationship Stage" in props:
         updates["Relationship Stage"] = {"select": {"name": "Initial Outreach"}}
 
-    # Update Last Contact Date
     if "Last Contact Date" in props:
         updates["Last Contact Date"] = {"date": {"start": now_date}}
 
-    # Store the draft URL if property exists
     if "Outreach Draft URL" in props and draft_url:
         updates["Outreach Draft URL"] = {"url": draft_url}
 
-    # Store the subject line
     if "Latest Outreach Subject" in props and subject:
         updates["Latest Outreach Subject"] = {
             "rich_text": [{"text": {"content": subject[:2000]}}]
         }
 
-    # Store primary client matched
     if "Latest Outreach Client" in props and primary_client:
         updates["Latest Outreach Client"] = {
             "rich_text": [{"text": {"content": primary_client}}]
         }
 
-    # Store LLM reasoning in notes (append, don't overwrite)
     if "Qualification Notes" in props and reasoning:
         current_notes = _get_plain_text_from_rich(
             props.get("Qualification Notes", {}).get("rich_text", [])
@@ -520,15 +488,11 @@ def update_firm_page_with_outreach(
             "rich_text": [{"text": {"content": new_notes[:2000]}}]
         }
 
-    # Update Last Outreach Run date
     if "Last Outreach Run" in props:
         updates["Last Outreach Run"] = {"date": {"start": now_date}}
 
     if not updates:
-        logger.info(
-            f"No matching properties to update on firm page {firm_id}. "
-            "Consider adding: Relationship Stage, Last Contact Date, Outreach Draft URL"
-        )
+        logger.info(f"No matching properties to update on firm page {firm_id}")
         return
 
     notion.pages.update(page_id=firm_id, properties=updates)
@@ -536,197 +500,145 @@ def update_firm_page_with_outreach(
 
 
 # =============================================================================
-# WEBHOOK SERVER
+# ROUTES
 # =============================================================================
 
-def start_webhook_server(port: int = 5000) -> None:
-    from flask import Flask, request, jsonify
+@app.route("/webhook/outreach", methods=["POST"])
+def outreach_webhook():
+    """
+    Main outreach webhook endpoint.
+    Receives a firm_id and executes the full outreach workflow.
+    """
+    logger.info("🚨 /webhook/outreach endpoint was hit")
 
-    port = int(os.environ.get("PORT", port))
-    app = Flask(__name__)
+    data = request.get_json() or {}
+    firm_id = data.get("firm_id")
 
-    @app.route("/webhook/outreach", methods=["POST"])
-    def outreach_webhook():
-        """
-        Main outreach webhook endpoint.
-        Receives a firm_id and executes the full outreach workflow:
-          1. Load firm details from Notion
-          2. Generate outreach draft via LLM
-          3. Create Gmail draft
-          4. Update firm page in Notion
-        """
-        print("✅ outreach_webhook() was triggered")
-        logger.info("🚨 /webhook/outreach endpoint was hit")
+    logger.info(f"📬 Payload received: {data}")
 
-        data = request.get_json() or {}
-        firm_id = data.get("firm_id")
-
-        print(f"📬 Payload received: {data}")
-        logger.info(f"📬 Payload received: {data}")
-
-        # Validate firm_id
-        if not firm_id:
-            logger.error("❌ Missing firm_id in payload")
-            return jsonify({
-                "status": "error",
-                "message": "Missing required field: firm_id"
-            }), 400
-
-        try:
-            # 1. Load firm details from Notion
-            logger.info(f"📥 Loading firm details for {firm_id}...")
-            firm = get_firm_details_from_notion(firm_id)
-
-            if not firm.get("firm_name"):
-                logger.warning(f"⚠️ Firm {firm_id} has no name — proceeding anyway")
-
-            # 2. Generate outreach draft via LLM
-            logger.info(f"✍️ Generating LLM outreach for {firm.get('firm_name')}...")
-            outreach = generate_outreach_for_firm(firm)
-
-            # 3. Create Gmail draft
-            logger.info("📧 Creating Gmail draft...")
-            gmail_result = create_gmail_draft(outreach)
-
-            # 4. Update firm page in Notion
-            logger.info("📝 Updating firm page with outreach info...")
-            update_firm_page_with_outreach(firm, outreach, gmail_result)
-
-            logger.info(f"✅ Outreach workflow completed for {firm.get('firm_name')}")
-
-            return jsonify({
-                "status": "ok",
-                "message": f"Outreach created for {firm.get('firm_name')}",
-                "firm_id": firm_id,
-                "firm_name": firm.get("firm_name"),
-                "primary_client": outreach.get("primary_client"),
-                "reasoning": outreach.get("reasoning"),
-                "gmail_draft_url": gmail_result.get("gmail_draft_url"),
-                "gmail_success": gmail_result.get("success")
-            }), 200
-
-        except Exception as e:
-            logger.error(f"❌ Outreach workflow failed: {e}", exc_info=True)
-            return jsonify({
-                "status": "error",
-                "message": str(e),
-                "firm_id": firm_id
-            }), 500
-
-    @app.route("/webhook/email-reply", methods=["POST"])
-    def email_reply_webhook():
-        """
-        Email reply detection webhook.
-        Receives thread_id, sender_email, email_body and updates Outreach Log.
-        """
-        print("✅ email_reply_webhook() was triggered")
-        logger.info("🚨 /webhook/email-reply endpoint was hit")
-
-        data = request.get_json() or {}
-        thread_id = data.get("thread_id")
-        sender_email = data.get("sender_email")
-        email_body = data.get("email_body")
-        received_date = data.get("received_date")
-
-        print(f"📬 Payload received: {data}")
-        logger.info(f"📬 Email reply payload received for thread: {thread_id}")
-
-        # Validate required fields
-        if not thread_id:
-            return jsonify({
-                "status": "error",
-                "message": "Missing required field: thread_id"
-            }), 400
-
-        if not email_body:
-            return jsonify({
-                "status": "error",
-                "message": "Missing required field: email_body"
-            }), 400
-
-        try:
-            result = process_email_reply(
-                thread_id=thread_id,
-                sender_email=sender_email or "unknown@example.com",
-                email_body=email_body,
-                received_date=received_date,
-            )
-
-            status_code = 200 if result.get("status") != "error" else 500
-            return jsonify(result), status_code
-
-        except Exception as e:
-            logger.error(f"❌ Email reply processing failed: {e}", exc_info=True)
-            return jsonify({
-                "status": "error",
-                "message": str(e)
-            }), 500
-
-    @app.route("/health", methods=["GET"])
-    def health_check():
-        """Health check endpoint for monitoring."""
-        print("💚 /health route hit")
-        logger.info("💚 /health route hit")
+    if not firm_id:
+        logger.error("❌ Missing firm_id in payload")
         return jsonify({
-            "status": "healthy",
-            "service": "plinian-outreach-webhook",
-            "timestamp": datetime.utcnow().isoformat()
+            "status": "error",
+            "message": "Missing required field: firm_id"
+        }), 400
+
+    try:
+        # 1. Load firm details from Notion
+        logger.info(f"📥 Loading firm details for {firm_id}...")
+        firm = get_firm_details_from_notion(firm_id)
+
+        if not firm.get("firm_name"):
+            logger.warning(f"⚠️ Firm {firm_id} has no name — proceeding anyway")
+
+        # 2. Generate outreach draft via LLM
+        logger.info(f"✍️ Generating LLM outreach for {firm.get('firm_name')}...")
+        outreach = generate_outreach_for_firm(firm)
+
+        # 3. Create Gmail draft
+        logger.info("📧 Creating Gmail draft...")
+        gmail_result = create_gmail_draft(outreach)
+
+        # 4. Update firm page in Notion
+        logger.info("📝 Updating firm page with outreach info...")
+        update_firm_page_with_outreach(firm, outreach, gmail_result)
+
+        logger.info(f"✅ Outreach workflow completed for {firm.get('firm_name')}")
+
+        return jsonify({
+            "status": "ok",
+            "message": f"Outreach created for {firm.get('firm_name')}",
+            "firm_id": firm_id,
+            "firm_name": firm.get("firm_name"),
+            "primary_client": outreach.get("primary_client"),
+            "reasoning": outreach.get("reasoning"),
+            "gmail_draft_url": gmail_result.get("gmail_draft_url"),
+            "gmail_success": gmail_result.get("success")
         }), 200
 
-    @app.route("/", methods=["GET"])
-    def index():
-        """Root endpoint with service info."""
+    except Exception as e:
+        logger.error(f"❌ Outreach workflow failed: {e}", exc_info=True)
         return jsonify({
-            "service": "Plinian Strategies Outreach Webhook",
-            "version": "2.0.0",
-            "endpoints": {
-                "/webhook/outreach": "POST - Trigger LLM-powered outreach for a firm",
-                "/webhook/email-reply": "POST - Process email reply",
-                "/health": "GET - Health check"
-            }
-        }), 200
+            "status": "error",
+            "message": str(e),
+            "firm_id": firm_id
+        }), 500
 
-    print("📋 Registered routes:")
-    logger.info("📋 Registered routes:")
-    for rule in app.url_map.iter_rules():
-        print(f"🔗 {rule.rule} [{', '.join(rule.methods - {'HEAD', 'OPTIONS'})}]")
-        logger.info(f"🔗 {rule.rule} [{', '.join(rule.methods - {'HEAD', 'OPTIONS'})}]")
 
-    print(f"🚀 Starting webhook server on port {port}...")
-    logger.info(f"🚀 Starting webhook server on port {port}...")
+@app.route("/webhook/email-reply", methods=["POST"])
+def email_reply_webhook():
+    """Email reply detection webhook."""
+    logger.info("🚨 /webhook/email-reply endpoint was hit")
 
-    app.run(host="0.0.0.0", port=port, debug=True)
+    data = request.get_json() or {}
+    thread_id = data.get("thread_id")
+    sender_email = data.get("sender_email")
+    email_body = data.get("email_body")
+    received_date = data.get("received_date")
+
+    logger.info(f"📬 Email reply payload received for thread: {thread_id}")
+
+    if not thread_id:
+        return jsonify({
+            "status": "error",
+            "message": "Missing required field: thread_id"
+        }), 400
+
+    if not email_body:
+        return jsonify({
+            "status": "error",
+            "message": "Missing required field: email_body"
+        }), 400
+
+    try:
+        result = process_email_reply(
+            thread_id=thread_id,
+            sender_email=sender_email or "unknown@example.com",
+            email_body=email_body,
+            received_date=received_date,
+        )
+
+        status_code = 200 if result.get("status") != "error" else 500
+        return jsonify(result), status_code
+
+    except Exception as e:
+        logger.error(f"❌ Email reply processing failed: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint for monitoring."""
+    logger.info("💚 /health route hit")
+    return jsonify({
+        "status": "healthy",
+        "service": "plinian-outreach-webhook",
+        "timestamp": datetime.utcnow().isoformat()
+    }), 200
+
+
+@app.route("/", methods=["GET"])
+def index():
+    """Root endpoint with service info."""
+    return jsonify({
+        "service": "Plinian Strategies Outreach Webhook",
+        "version": "2.0.0",
+        "endpoints": {
+            "/webhook/outreach": "POST - Trigger LLM-powered outreach for a firm",
+            "/webhook/email-reply": "POST - Process email reply",
+            "/health": "GET - Health check"
+        }
+    }), 200
 
 
 # =============================================================================
-# CLI ENTRYPOINT
+# LOCAL DEV ENTRYPOINT
 # =============================================================================
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "server":
-        start_webhook_server()
-    else:
-        print("Plinian Strategies - Outreach & Response Detector")
-        print("=" * 55)
-        print()
-        print("Usage:")
-        print("  python response_detector.py server    # Start webhook server")
-        print("  python response_detector.py           # Show this help")
-        print()
-        print("Endpoints (when running as server):")
-        print("  POST /webhook/outreach     - Trigger LLM outreach for a firm")
-        print("  POST /webhook/email-reply  - Process email reply")
-        print("  GET  /health               - Health check")
-        print()
-        print("Example test (email reply processing):")
-        print("-" * 55)
-        result = process_email_reply(
-            thread_id="example-thread-id",
-            sender_email="test@example.com",
-            email_body=(
-                "Thanks for reaching out! I'd love to discuss this further. "
-                "Let's schedule a meeting."
-            ),
-            received_date="2025-11-24",
-        )
-        print(f"Result: {result}")
+    print("🚀 Starting Plinian Outreach Webhook (local dev mode)...")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
