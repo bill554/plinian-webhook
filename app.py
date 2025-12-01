@@ -353,21 +353,17 @@ def test_enrich_person(page_id):
 
 @app.route('/webhook/clay/firm-score', methods=['POST'])
 def handle_firm_scoring():
-    """
-    Receive enriched firm data from Clay, run Claude scoring against all 6 client rubrics.
-    """
     data = request.json
     logger.info(f"Received firm for scoring: {data}")
     
     notion_page_id = data.get('notion_page_id')
     firm_name = data.get('firm_name')
     website = data.get('website')
-    firm_research = data.get('firm_research', '')  # Claygent output
+    firm_research = data.get('firm_research', '')
     
     if not notion_page_id or not firm_name:
         return jsonify({'error': 'Missing notion_page_id or firm_name'}), 400
     
-    # Build the scoring prompt
     scoring_prompt = f"""You are an expert institutional capital raising advisor. Analyze this firm and score their fit for each of our 6 clients.
 
 FIRM INFORMATION:
@@ -419,10 +415,10 @@ Return your analysis as JSON:
     "overall_notes": "brief summary"
 }}
 
-Return ONLY valid JSON, no other text."""
+Return ONLY valid JSON, no markdown fences or other text."""
 
-    # Call Claude API
     import anthropic
+    import json
     
     try:
         client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
@@ -438,18 +434,39 @@ Return ONLY valid JSON, no other text."""
         response_text = message.content[0].text
         logger.info(f"Claude scoring response: {response_text}")
         
+        # Strip markdown code fences if present
+        clean_response = response_text.strip()
+        if clean_response.startswith('```'):
+            clean_response = clean_response.split('\n', 1)[1]
+        if clean_response.endswith('```'):
+            clean_response = clean_response.rsplit('```', 1)[0]
+        clean_response = clean_response.strip()
+        
         # Parse JSON response
-        import json
-        scores = json.loads(response_text)
+        scores = json.loads(clean_response)
+        
+        # Normalize fit values to match Notion select options
+        def normalize_fit(value):
+            if not value:
+                return 'N/A'
+            value = value.strip()
+            if value.lower() in ['strong', 'strong fit']:
+                return 'Strong'
+            elif value.lower() in ['moderate', 'moderate fit']:
+                return 'Moderate'
+            elif value.lower() in ['weak', 'weak fit']:
+                return 'Weak'
+            else:
+                return 'N/A'
         
         # Update Notion with scores
         notion_updates = {
-            'StoneRiver Fit': {'select': {'name': scores.get('stoneriver_fit', 'N/A')}},
-            'Ashton Gray Fit': {'select': {'name': scores.get('ashtongray_fit', 'N/A')}},
-            'Willow Crest Fit': {'select': {'name': scores.get('willowcrest_fit', 'N/A')}},
-            'ICW Fit': {'select': {'name': scores.get('icw_fit', 'N/A')}},
-            'Highmount Fit': {'select': {'name': scores.get('highmount_fit', 'N/A')}},
-            'Co-Invests Fit': {'select': {'name': scores.get('coinvest_fit', 'N/A')}},
+            'StoneRiver Fit': {'select': {'name': normalize_fit(scores.get('stoneriver_fit'))}},
+            'Ashton Gray Fit': {'select': {'name': normalize_fit(scores.get('ashtongray_fit'))}},
+            'Willow Crest Fit': {'select': {'name': normalize_fit(scores.get('willowcrest_fit'))}},
+            'ICW Fit': {'select': {'name': normalize_fit(scores.get('icw_fit'))}},
+            'Highmount Fit': {'select': {'name': normalize_fit(scores.get('highmount_fit'))}},
+            'Co-Invests Fit': {'select': {'name': normalize_fit(scores.get('coinvest_fit'))}},
             'Research Status': {'select': {'name': 'Qualified'}}
         }
         
