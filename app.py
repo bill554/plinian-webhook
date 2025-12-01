@@ -270,38 +270,35 @@ def handle_clay_firm_enriched():
 def handle_clay_person_enriched():
     data = request.json
     logger.info(f"Received enriched person data from Clay: {data}")
-    notion_page_id = data.get('notion_page_id')
-    if not notion_page_id:
-        return jsonify({'error': 'Missing notion_page_id'}), 400
-    updates = {}
+    
+    # Build properties for new Prospect
+    prospect_properties = {
+        'Name': {'title': [{'text': {'content': data.get('full_name', 'Unknown')}}]},
+        'Company': {'rich_text': [{'text': {'content': data.get('company_name', '')}}]},
+        'Status': {'select': {'name': 'Qualified' if data.get('email') else 'New'}}
+    }
+    
     if data.get('email'):
-        updates['Email'] = {'email': data['email']}
+        prospect_properties['Email'] = {'email': data['email']}
+    
     if data.get('linkedin_url'):
-        updates['LinkedIn URL'] = {'url': data['linkedin_url']}
+        prospect_properties['LinkedIn URL'] = {'url': data['linkedin_url']}
+    
     if data.get('title'):
-        updates['Title/Role'] = {'rich_text': [{'text': {'content': data['title']}}]}
-    if data.get('phone'):
-        updates['Mobile Phone'] = {'phone_number': data['phone']}
-    notes = []
-    if data.get('email_confidence'):
-        notes.append(f"Email confidence: {data['email_confidence']}")
-    if data.get('email_source'):
-        notes.append(f"Source: {data['email_source']}")
-    if notes:
-        updates['Individual Notes'] = {
-            'rich_text': [{'text': {'content': ' | '.join(notes)}}]
-        }
-    if data.get('email'):
-        updates['Status'] = {'select': {'name': 'Qualified'}}
+        prospect_properties['Title/Role'] = {'rich_text': [{'text': {'content': data['title']}}]}
+    
+    # Create the Prospect in Notion
+    created = create_notion_page(PROSPECTS_DB_ID, prospect_properties)
+    
+    if created:
+        logger.info(f"Created prospect: {data.get('full_name')}")
+        return jsonify({
+            'status': 'success',
+            'prospect_created': data.get('full_name'),
+            'email_found': bool(data.get('email'))
+        })
     else:
-        updates['Status'] = {'select': {'name': 'Enriching'}}
-    if updates:
-        update_notion_page(notion_page_id, updates)
-    return jsonify({
-        'status': 'success',
-        'prospect_updated': notion_page_id,
-        'email_found': bool(data.get('email'))
-    })
+        return jsonify({'error': 'Failed to create prospect'}), 500
 
 
 @app.route('/test/enrich-firm/<page_id>', methods=['GET'])
