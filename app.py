@@ -480,14 +480,6 @@ Co-Invest: {scores.get('coinvest_rationale', '')}
     except Exception as e:
         logger.error(f"Claude scoring failed: {str(e)}")
         return jsonify({'error': str(e)}), 500
-```
-
-Also add `anthropic` to your **requirements.txt** in GitHub:
-```
-flask==3.0.0
-requests==2.31.0
-gunicorn==21.2.0
-anthropic
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
