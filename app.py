@@ -143,24 +143,50 @@ def list_routes():
 def handle_notion_new_firm():
     if not verify_webhook_signature(request):
         return jsonify({'error': 'Invalid signature'}), 401
-    data = request.json
-    logger.info(f"Received new firm webhook: {data}")
-    page_id = data.get('page_id')
-    firm_name = data.get('firm_name')
-    website = data.get('website')
+    
+    payload = request.json
+    logger.info(f"Received new firm webhook: {payload}")
+    
+    # Handle Notion's nested payload structure
+    if 'data' in payload and isinstance(payload['data'], dict):
+        # Notion automation format
+        page_data = payload['data']
+        page_id = page_data.get('id')
+        props = page_data.get('properties', {})
+        
+        # Extract firm name
+        firm_name = ''
+        if props.get('Firm Name', {}).get('title'):
+            title_arr = props['Firm Name']['title']
+            if title_arr:
+                firm_name = title_arr[0].get('plain_text', '')
+        
+        # Extract website
+        website = props.get('Website', {}).get('url', '')
+    else:
+        # Simple flat format (for manual testing)
+        page_id = payload.get('page_id')
+        firm_name = payload.get('firm_name')
+        website = payload.get('website')
+    
     if not page_id:
         return jsonify({'error': 'Missing page_id'}), 400
+    
     domain = extract_domain(website)
+    
     if not domain:
         logger.warning(f"No domain found for firm {firm_name}")
-        return jsonify({'error': 'No website/domain provided'}), 400
+        return jsonify({'error': 'No website/domain provided', 'firm': firm_name}), 400
+    
     clay_data = {
         'page_id': page_id,
         'firm_name': firm_name,
         'domain': domain,
         'website': website
     }
+    
     success = send_to_clay_firm_table(clay_data)
+    
     if success:
         update_notion_page(page_id, {
             'Research Status': {'select': {'name': 'Researching'}}
