@@ -356,10 +356,14 @@ def handle_firm_scoring():
     data = request.json
     logger.info(f"Received firm for scoring: {data}")
     
-    notion_page_id = data.get('notion_page_id')
+notion_page_id = data.get('notion_page_id')
     firm_name = data.get('firm_name')
     website = data.get('website')
     firm_research = data.get('firm_research', '')
+    
+    # Sanitize research text
+    if firm_research:
+        firm_research = str(firm_research).replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')[:5000]
     
     if not notion_page_id or not firm_name:
         return jsonify({'error': 'Missing notion_page_id or firm_name'}), 400
