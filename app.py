@@ -353,20 +353,20 @@ def test_enrich_person(page_id):
 
 @app.route('/webhook/clay/firm-score', methods=['POST'])
 def handle_firm_scoring():
-    data = request.json
-    logger.info(f"Received firm for scoring: {data}")
+    data = request.json or {}
     
-notion_page_id = data.get('notion_page_id')
+    notion_page_id = data.get('notion_page_id')
     firm_name = data.get('firm_name')
     website = data.get('website')
-    firm_research = data.get('firm_research', '')
     
-    # Sanitize research text
+    # Get research from query param OR body
+    firm_research = request.args.get('research', '') or data.get('firm_research', '')
+    
+    # Sanitize
     if firm_research:
-        firm_research = str(firm_research).replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')[:5000]
+        firm_research = str(firm_research).replace('\n', ' ').replace('\r', ' ')[:5000]
     
-    if not notion_page_id or not firm_name:
-        return jsonify({'error': 'Missing notion_page_id or firm_name'}), 400
+    logger.info(f"Received firm for scoring: {firm_name}, research length: {len(firm_research)}")
     
     scoring_prompt = f"""You are an expert institutional capital raising advisor. Analyze this firm and score their fit for each of our 6 clients.
 
