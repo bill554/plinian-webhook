@@ -351,6 +351,143 @@ def test_enrich_person(page_id):
         'data': clay_data
     })
 
+@app.route('/webhook/clay/firm-score', methods=['POST'])
+def handle_firm_scoring():
+    """
+    Receive enriched firm data from Clay, run Claude scoring against all 6 client rubrics.
+    """
+    data = request.json
+    logger.info(f"Received firm for scoring: {data}")
+    
+    notion_page_id = data.get('notion_page_id')
+    firm_name = data.get('firm_name')
+    website = data.get('website')
+    firm_research = data.get('firm_research', '')  # Claygent output
+    
+    if not notion_page_id or not firm_name:
+        return jsonify({'error': 'Missing notion_page_id or firm_name'}), 400
+    
+    # Build the scoring prompt
+    scoring_prompt = f"""You are an expert institutional capital raising advisor. Analyze this firm and score their fit for each of our 6 clients.
+
+FIRM INFORMATION:
+- Name: {firm_name}
+- Website: {website}
+- Research: {firm_research}
+
+SCORE EACH CLIENT (Strong / Moderate / Weak / N/A):
+
+1. STONERIVER (Multifamily Real Estate - Southeast US, Value-Add/Development):
+   - Good fit if: allocates to real estate, value-add tolerance, Sunbelt/Southeast focus, $5-25M checks
+   - Poor fit if: core-only, gateway cities only, no real estate mandate
+
+2. ASHTON GRAY (Healthcare-Anchored Retail Real Estate - Stabilized Income):
+   - Good fit if: allocates to core/core+ real estate, income-focused, healthcare real estate interest
+   - Poor fit if: development-only, no retail, short liquidity needs
+
+3. WILLOW CREST (Inflation-Linked Structural Alpha - Long Duration):
+   - Good fit if: real assets mandate, inflation protection interest, 10-20yr horizon, $50-200M checks
+   - Poor fit if: needs liquidity, no alternatives, won't sign NDAs early
+
+4. ICW HOLDINGS (Global Macro-Driven Public Equities):
+   - Good fit if: global equity mandate, macro-aware, interested in risk-managed equities
+   - Poor fit if: private-only, hedge fund only, passive/index only
+
+5. HIGHMOUNT (Sports & Entertainment Growth PE):
+   - Good fit if: growth PE mandate, media/entertainment interest, $50-250M checks
+   - Poor fit if: core real estate only, no growth equity, short time horizon
+
+6. CO-INVEST PLATFORM (Direct Private Deals):
+   - Good fit if: direct co-invest capability, flexible mandate, fast decision process
+   - Poor fit if: fund-only investor, slow IC process, needs lead sponsor
+
+Return your analysis as JSON:
+{{
+    "stoneriver_fit": "Strong/Moderate/Weak/N/A",
+    "stoneriver_rationale": "brief reason",
+    "ashtongray_fit": "Strong/Moderate/Weak/N/A", 
+    "ashtongray_rationale": "brief reason",
+    "willowcrest_fit": "Strong/Moderate/Weak/N/A",
+    "willowcrest_rationale": "brief reason",
+    "icw_fit": "Strong/Moderate/Weak/N/A",
+    "icw_rationale": "brief reason",
+    "highmount_fit": "Strong/Moderate/Weak/N/A",
+    "highmount_rationale": "brief reason",
+    "coinvest_fit": "Strong/Moderate/Weak/N/A",
+    "coinvest_rationale": "brief reason",
+    "best_match": "client name with strongest fit",
+    "overall_notes": "brief summary"
+}}
+
+Return ONLY valid JSON, no other text."""
+
+    # Call Claude API
+    import anthropic
+    
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
+        
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[
+                {"role": "user", "content": scoring_prompt}
+            ]
+        )
+        
+        response_text = message.content[0].text
+        logger.info(f"Claude scoring response: {response_text}")
+        
+        # Parse JSON response
+        import json
+        scores = json.loads(response_text)
+        
+        # Update Notion with scores
+        notion_updates = {
+            'StoneRiver Fit': {'select': {'name': scores.get('stoneriver_fit', 'N/A')}},
+            'Ashton Gray Fit': {'select': {'name': scores.get('ashtongray_fit', 'N/A')}},
+            'Willow Crest Fit': {'select': {'name': scores.get('willowcrest_fit', 'N/A')}},
+            'ICW Fit': {'select': {'name': scores.get('icw_fit', 'N/A')}},
+            'Highmount Fit': {'select': {'name': scores.get('highmount_fit', 'N/A')}},
+            'Co-Invests Fit': {'select': {'name': scores.get('coinvest_fit', 'N/A')}},
+            'Research Status': {'select': {'name': 'Qualified'}}
+        }
+        
+        # Add rationale to Qualification Notes
+        rationale = f"""Best Match: {scores.get('best_match', 'TBD')}
+
+StoneRiver: {scores.get('stoneriver_rationale', '')}
+Ashton Gray: {scores.get('ashtongray_rationale', '')}
+Willow Crest: {scores.get('willowcrest_rationale', '')}
+ICW: {scores.get('icw_rationale', '')}
+Highmount: {scores.get('highmount_rationale', '')}
+Co-Invest: {scores.get('coinvest_rationale', '')}
+
+{scores.get('overall_notes', '')}"""
+        
+        notion_updates['Qualification Notes'] = {
+            'rich_text': [{'text': {'content': rationale[:2000]}}]
+        }
+        
+        update_notion_page(notion_page_id, notion_updates)
+        
+        return jsonify({
+            'status': 'success',
+            'firm': firm_name,
+            'scores': scores
+        })
+        
+    except Exception as e:
+        logger.error(f"Claude scoring failed: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+```
+
+Also add `anthropic` to your **requirements.txt** in GitHub:
+```
+flask==3.0.0
+requests==2.31.0
+gunicorn==21.2.0
+anthropic
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
