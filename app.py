@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import os
 import logging
+import json
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
@@ -58,7 +59,7 @@ def update_notion_page(page_id, properties):
     response = requests.patch(url, headers=NOTION_HEADERS, json=payload)
     if response.status_code == 200:
         return response.json()
-    logger.error(f"Failed to update Notion page: {response.status_code}")
+    logger.error(f"Failed to update Notion page: {response.status_code} - {response.text}")
     return None
 
 
@@ -71,7 +72,7 @@ def create_notion_page(database_id, properties):
     response = requests.post(url, headers=NOTION_HEADERS, json=payload)
     if response.status_code == 200:
         return response.json()
-    logger.error(f"Failed to create Notion page: {response.status_code}")
+    logger.error(f"Failed to create Notion page: {response.status_code} - {response.text}")
     return None
 
 
@@ -149,22 +150,18 @@ def handle_notion_new_firm():
     
     # Handle Notion's nested payload structure
     if 'data' in payload and isinstance(payload['data'], dict):
-        # Notion automation format
         page_data = payload['data']
         page_id = page_data.get('id')
         props = page_data.get('properties', {})
         
-        # Extract firm name
         firm_name = ''
         if props.get('Firm Name', {}).get('title'):
             title_arr = props['Firm Name']['title']
             if title_arr:
                 firm_name = title_arr[0].get('plain_text', '')
         
-        # Extract website
         website = props.get('Website', {}).get('url', '')
     else:
-        # Simple flat format (for manual testing)
         page_id = payload.get('page_id')
         firm_name = payload.get('firm_name')
         website = payload.get('website')
@@ -271,7 +268,6 @@ def handle_clay_person_enriched():
     data = request.json
     logger.info(f"Received enriched person data from Clay: {data}")
     
-    # Build properties for new Prospect
     prospect_properties = {
         'Name': {'title': [{'text': {'content': data.get('full_name', 'Unknown')}}]},
         'Company': {'rich_text': [{'text': {'content': data.get('company_name', '')}}]},
@@ -287,7 +283,6 @@ def handle_clay_person_enriched():
     if data.get('title'):
         prospect_properties['Title/Role'] = {'rich_text': [{'text': {'content': data['title']}}]}
     
-    # Create the Prospect in Notion
     created = create_notion_page(PROSPECTS_DB_ID, prospect_properties)
     
     if created:
@@ -351,8 +346,13 @@ def test_enrich_person(page_id):
         'data': clay_data
     })
 
+
 @app.route('/webhook/clay/firm-score', methods=['POST'])
 def handle_firm_scoring():
+    """
+    Receives firm data from Clay, scores against all 6 Plinian clients using Claude,
+    and updates Notion with fit scores and qualification notes.
+    """
     data = request.json or {}
     
     notion_page_id = data.get('notion_page_id')
@@ -368,75 +368,176 @@ def handle_firm_scoring():
     
     logger.info(f"Received firm for scoring: {firm_name}, research length: {len(firm_research)}")
     
-    scoring_prompt = f"""You are an expert institutional capital raising advisor. Analyze this firm and score their fit for each of our 6 clients.
+    # =========================================================================
+    # COMPREHENSIVE SCORING PROMPT - Based on Plinian Training Frameworks
+    # =========================================================================
+    scoring_prompt = f"""You are an expert institutional capital raising advisor for Plinian Strategies. 
+Analyze this allocator firm and score their fit for each of our 6 clients.
 
 FIRM INFORMATION:
 - Name: {firm_name}
 - Website: {website}
 - Research: {firm_research}
 
-SCORE EACH CLIENT (Strong / Moderate / Weak / N/A):
+=============================================================================
+SCORING INSTRUCTIONS
+=============================================================================
+For each client, evaluate the firm against the specific criteria below.
+- "Strong" = Multiple high-fit signals present, no disqualifying factors, clear alignment
+- "Moderate" = Some alignment, no hard disqualifiers, but missing key signals or unconfirmed
+- "Weak" = Minimal alignment, potential mismatches, or only tangential fit
+- "N/A" = Clear disqualifier present OR completely wrong asset class/mandate
 
-1. STONERIVER (Multifamily Real Estate - Southeast US, Value-Add/Development):
-   - Good fit if: allocates to real estate, value-add tolerance, Sunbelt/Southeast focus, $5-25M checks
-   - Poor fit if: core-only, gateway cities only, no real estate mandate
+Be rigorous. Most firms should NOT be "Strong" for most clients.
+If research is insufficient to evaluate, default to "Weak" or "N/A" with explanation.
 
-2. ASHTON GRAY (Healthcare-Anchored Retail Real Estate - Stabilized Income):
-   - Good fit if: allocates to core/core+ real estate, income-focused, healthcare real estate interest
-   - Poor fit if: development-only, no retail, short liquidity needs
+=============================================================================
+CLIENT 1: STONERIVER - Fund III
+=============================================================================
+PRODUCT: $200M Multifamily Real Estate Fund, Southeast US, Value-Add + Development (up to 30%)
+STRUCTURE: Vertically integrated (in-house construction + property management)
+CHECK SIZE: $5M-$25M
 
-3. WILLOW CREST (Inflation-Linked Structural Alpha - Long Duration):
-   - Good fit if: real assets mandate, inflation protection interest, 10-20yr horizon, $50-200M checks
-   - Poor fit if: needs liquidity, no alternatives, won't sign NDAs early
+TARGET TIERS:
+1. "Operator-Focused" Allocators: MFOs, SFOs, specialized RIAs seeking "vertically integrated" or "operator-led" deals, Sunbelt focus, prefer funds <$500M
+2. Regional Institutions: Healthcare Foundations, Hospitals, University Endowments, Community Foundations with RE/Alternatives bucket
+3. Wealth Aggregators: CIOs of large RIAs/Wealth Platforms buying on behalf of multiple HNW clients
+4. OCIO/Consultants: Senior RE leadership with defined manager research teams
 
-4. ICW HOLDINGS (Global Macro-Driven Public Equities):
-   - Good fit if: global equity mandate, macro-aware, interested in risk-managed equities
-   - Poor fit if: private-only, hedge fund only, passive/index only
+HIGH-FIT SIGNALS: "Vertically integrated", "Operator", "Sunbelt", "Southeast", "Migration", "Value-Add", "Opportunistic", "Middle Market", "Real Assets", multifamily/apartment investments
 
-5. HIGHMOUNT (Sports & Entertainment Growth PE):
-   - Good fit if: growth PE mandate, media/entertainment interest, $50-250M checks
-   - Poor fit if: core real estate only, no growth equity, short time horizon
+DISQUALIFY IF: Retail without FO structure, Core-only/Stabilized-only mandate (can't tolerate 30% development), Gateway purist (NYC/SF/LA only), Distressed debt/credit hunter (equity strategy), Internal RE org doing direct sourcing, Check size >$50M
 
-6. CO-INVEST PLATFORM (Direct Private Deals):
-   - Good fit if: direct co-invest capability, flexible mandate, fast decision process
-   - Poor fit if: fund-only investor, slow IC process, needs lead sponsor
+=============================================================================
+CLIENT 2: ASHTON GRAY - AGIF
+=============================================================================
+PRODUCT: Evergreen fund of STABILIZED healthcare-anchored retail real estate
+STRUCTURE: 31 properties, 100% occupied, ~10yr WALT, 28% GP co-invest, >7% monthly distributions
+LIQUIDITY: 2-year lockup, 10% annual NAV redemption, K-1
 
-Return your analysis as JSON:
+CRITICAL: AGIF is NOT development. It is stabilized income with healthcare tenancy.
+
+TARGET TIERS:
+1. Real Estate Income/Core+ Allocators: Endowments, healthcare foundations, hospitals, insurance, pensions with income mandates
+2. Family Offices seeking income, tax efficiency, K-1, healthcare tenancy
+3. Wealth Platforms/RIAs offering income alternatives
+4. OCIOs advising on income/stable RE
+
+HIGH-FIT SIGNALS: "Core/Core+", "Income-focused", "Yield", "Healthcare real estate", "Medical office", "Long-term leases", "WALT", "NNN", "Sunbelt", "Evergreen", "Durable income", "Defensive tenancy"
+
+DISQUALIFY IF: Gateway-only retail mandates (AGIF is Sunbelt), Development-only, Debt/credit-only, Industrial/multifamily-only, Retail individuals, <2yr liquidity needs, Excludes retail/healthcare retail, Value-add/distressed seekers, Internal RE groups
+
+=============================================================================
+CLIENT 3: WILLOW CREST - Inflation Structural Alpha
+=============================================================================
+PRODUCT: Structural alpha, inflation-linked strategy exploiting long-duration economic dislocations
+STRUCTURE: Highly proprietary IP requiring NDA, 10-20+ year horizon, potential multi-X returns
+CHECK SIZE: $50M-$200M+
+
+CRITICAL: NOT traditional real assets. Confidential macro-driven structural trade.
+
+TARGET TIERS:
+1. Endowments & Foundations: Inflation-protection, real asset, diversifying buckets; long-duration comfort
+2. SWFs & Public Pensions: Large pools of long-duration capital, specialist inflation/real asset teams
+3. Large FOs/MFOs (Institutional-Grade Only): Inflation resilience, asymmetric opportunities, CIO with macro background
+
+HIGH-FIT SIGNALS: "Inflation-linked", "Inflation protection", "Inflation-sensitive", "Real Return", "Real Assets", "Non-correlated", "Diversifying", "Long-duration capital", "Patient capital", "Opportunistic", "Special Situations", "Structural Themes", prior timber/royalties/insurance-linked allocations
+
+DISQUALIFY IF: Retail individuals, Equity-only/60-40 traditionalists, Crypto-only allocators, Consultants without discretion, Won't sign NDAs early, Short-duration/high-liquidity needs, <$50M check capacity
+
+=============================================================================
+CLIENT 4: ICW HOLDINGS - Strategic Equities
+=============================================================================
+PRODUCT: Global macro-driven, balanced, long-only equity strategy with 4 sub-portfolios
+STRUCTURE: ~11.7% returns, ~7.8% vol, monthly liquidity, 1%/10% fees
+PEDIGREE: Founded by Mark Dinner, former senior Bridgewater leader (built algorithms for Pure Alpha, All Weather)
+
+CRITICAL: PUBLIC EQUITIES, long-only, no leverage. NOT a hedge fund.
+
+TARGET TIERS:
+1. Institutions with Global Equity Mandates: Endowments, foundations, healthcare systems, sovereigns, pensions, OCIOs
+2. MFOs/SFOs valuing equity compounding with macro discipline
+3. RIAs/Wealth Platforms seeking differentiated long-only exposure
+4. OCIOs/Consultants running global equity searches
+
+HIGH-FIT SIGNALS: "Global equity", "ACWI", "Macro-aware", "Regime-aware", "Risk-managed equities", "Downside mitigation", "Inflation resilience" (equity context), "Quality", "Cash flow focus", Bridgewater familiarity/respect
+
+DISQUALIFY IF: Private-only allocators, Hedge fund-only mandates (want leverage/shorting), Single-factor/single-region only, Leverage-seeking, Retail/unstaffed FOs, Explicitly avoid macro frameworks, Index-only buyers, Daily liquidity required
+
+=============================================================================
+CLIENT 5: HIGHMOUNT - Sports & Entertainment Growth PE
+=============================================================================
+PRODUCT: Growth PE fund focused on sports & entertainment, tech-enabled media, creator economy
+STRUCTURE: Pre-launch, targeting $1B+ raise
+CHECK SIZE: $50M-$250M
+PEDIGREE: Nine-figure Dude Perfect investment (April 2024)
+
+CRITICAL: GROWTH PRIVATE EQUITY, pre-launch. NOT real assets, NOT income.
+
+TARGET TIERS:
+1. Large Institutions with PE Growth Mandates: SWFs, large pensions, insurance, endowments with PE programs
+2. Foundations/Strategic Investors with growth capital or entertainment interest
+3. Growth-Focused FOs/MFOs willing to back pre-launch funds
+4. OCIOs/Consultants with PE growth mandates
+
+HIGH-FIT SIGNALS: "Private equity growth", "Growth equity", "Sports & entertainment", "Media", "Creator economy", "Live experiences", "Tech-enabled media", "Middle market PE", "Pre-fund commitment", "Anchor investor", prior sports/media investments
+
+DISQUALIFY IF: Retail individuals, Core/income-only mandates (no growth), Traditional buyout only, <5yr horizon, Avoid sports/entertainment/media, Passive/index only, Require full track record (this is pre-launch), Consultants without discretion
+
+=============================================================================
+CLIENT 6: CO-INVEST PLATFORM
+=============================================================================
+PRODUCT: Variable deal flow - direct minority equity, structured equity, JVs, club deals across sectors
+STRUCTURE: Deal-by-deal, not a fund
+CHECK SIZE: $5M-$200M+ depending on deal
+
+CRITICAL: About CO-INVEST CAPABILITY and MANDATE FLEXIBILITY.
+
+TARGET TIERS:
+1. Direct Co-Invest Specialists: SWFs, large pensions, mega-endowments, PE platforms with co-invest teams
+2. FOs/MFOs with Direct Investing capability: $1B+ with deal teams, evergreen capital
+3. PE FoFs with co-invest arms
+4. OCIOs deploying co-invest for E&F clients
+
+HIGH-FIT SIGNALS: "Direct co-investments", "Co-invest program", "Opportunistic private", "Direct deals", "GP-adjacent", "Flexible check sizes", "Fast-track diligence", "JVs", "Structured equity", evidence of prior direct deals outside fund commitments
+
+DISQUALIFY IF: Retail/unstaffed FOs, Fund-only policy (no co-invest capability), Public markets only, Core RE or index only, Rigid IC can't do off-cycle deals, <$5M minimum capacity, Won't do quick NDAs, Require GP sponsor to participate, Daily liquidity required
+
+=============================================================================
+OUTPUT FORMAT (Return ONLY valid JSON, no markdown fences)
+=============================================================================
 {{
     "stoneriver_fit": "Strong/Moderate/Weak/N/A",
-    "stoneriver_rationale": "brief reason",
-    "ashtongray_fit": "Strong/Moderate/Weak/N/A", 
-    "ashtongray_rationale": "brief reason",
+    "stoneriver_rationale": "2-3 sentence explanation citing specific evidence from research",
+    "ashtongray_fit": "Strong/Moderate/Weak/N/A",
+    "ashtongray_rationale": "2-3 sentence explanation citing specific evidence from research",
     "willowcrest_fit": "Strong/Moderate/Weak/N/A",
-    "willowcrest_rationale": "brief reason",
+    "willowcrest_rationale": "2-3 sentence explanation citing specific evidence from research",
     "icw_fit": "Strong/Moderate/Weak/N/A",
-    "icw_rationale": "brief reason",
+    "icw_rationale": "2-3 sentence explanation citing specific evidence from research",
     "highmount_fit": "Strong/Moderate/Weak/N/A",
-    "highmount_rationale": "brief reason",
+    "highmount_rationale": "2-3 sentence explanation citing specific evidence from research",
     "coinvest_fit": "Strong/Moderate/Weak/N/A",
-    "coinvest_rationale": "brief reason",
-    "best_match": "client name with strongest fit",
-    "overall_notes": "brief summary"
-}}
-
-Return ONLY valid JSON, no markdown fences or other text."""
+    "coinvest_rationale": "2-3 sentence explanation citing specific evidence from research",
+    "best_match": "Client name with strongest fit, or 'None' if all N/A",
+    "overall_notes": "1-2 sentence summary of allocator profile and where they fit in Plinian's universe"
+}}"""
 
     import anthropic
-    import json
     
     try:
         client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
         
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1024,
+            max_tokens=2048,
             messages=[
                 {"role": "user", "content": scoring_prompt}
             ]
         )
         
         response_text = message.content[0].text
-        logger.info(f"Claude scoring response: {response_text}")
+        logger.info(f"Claude scoring response: {response_text[:500]}...")
         
         # Strip markdown code fences if present
         clean_response = response_text.strip()
@@ -453,7 +554,7 @@ Return ONLY valid JSON, no markdown fences or other text."""
         def normalize_fit(value):
             if not value:
                 return 'N/A'
-            value = value.strip()
+            value = str(value).strip()
             if value.lower() in ['strong', 'strong fit']:
                 return 'Strong'
             elif value.lower() in ['moderate', 'moderate fit']:
@@ -474,23 +575,34 @@ Return ONLY valid JSON, no markdown fences or other text."""
             'Research Status': {'select': {'name': 'Qualified'}}
         }
         
-        # Add rationale to Qualification Notes
+        # Build qualification notes with rationales
         rationale = f"""Best Match: {scores.get('best_match', 'TBD')}
 
-StoneRiver: {scores.get('stoneriver_rationale', '')}
-Ashton Gray: {scores.get('ashtongray_rationale', '')}
-Willow Crest: {scores.get('willowcrest_rationale', '')}
-ICW: {scores.get('icw_rationale', '')}
-Highmount: {scores.get('highmount_rationale', '')}
-Co-Invest: {scores.get('coinvest_rationale', '')}
+STONERIVER: {scores.get('stoneriver_rationale', '')}
 
+ASHTON GRAY: {scores.get('ashtongray_rationale', '')}
+
+WILLOW CREST: {scores.get('willowcrest_rationale', '')}
+
+ICW: {scores.get('icw_rationale', '')}
+
+HIGHMOUNT: {scores.get('highmount_rationale', '')}
+
+CO-INVEST: {scores.get('coinvest_rationale', '')}
+
+---
 {scores.get('overall_notes', '')}"""
         
         notion_updates['Qualification Notes'] = {
             'rich_text': [{'text': {'content': rationale[:2000]}}]
         }
         
-        update_notion_page(notion_page_id, notion_updates)
+        update_result = update_notion_page(notion_page_id, notion_updates)
+        
+        if update_result:
+            logger.info(f"Successfully updated Notion with scores for {firm_name}")
+        else:
+            logger.error(f"Failed to update Notion for {firm_name}")
         
         return jsonify({
             'status': 'success',
@@ -498,9 +610,14 @@ Co-Invest: {scores.get('coinvest_rationale', '')}
             'scores': scores
         })
         
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parsing failed: {str(e)}")
+        logger.error(f"Raw response: {response_text}")
+        return jsonify({'error': f'JSON parsing failed: {str(e)}'}), 500
     except Exception as e:
         logger.error(f"Claude scoring failed: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
