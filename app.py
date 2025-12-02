@@ -171,9 +171,21 @@ def handle_notion_new_firm():
     if 'data' in data:
         data = data['data']
     
-    # Extract page ID and properties
+    # Extract page ID
     page_id = data.get('id', '')
-    props = data.get('properties', {})
+    
+    if not page_id:
+        logger.warning("No page ID in webhook payload")
+        return jsonify({'error': 'No page ID provided'}), 400
+    
+    # ALWAYS fetch full page from Notion - webhook payloads don't include properties
+    logger.info(f"Fetching full page from Notion: {page_id}")
+    page = get_notion_page(page_id)
+    if not page:
+        logger.error(f"Failed to fetch page {page_id} from Notion")
+        return jsonify({'error': 'Failed to fetch page from Notion'}), 500
+    
+    props = page.get('properties', {})
     
     # Detect restart trigger
     is_restart = False
@@ -181,39 +193,24 @@ def handle_notion_new_firm():
         is_restart = True
         logger.info(f"Restart enrichment triggered for page {page_id}")
     
-    # Get firm name - handle both title array and plain text
+    # Get firm name
     firm_name_prop = props.get('Firm Name', {})
     if firm_name_prop.get('title'):
         firm_name = firm_name_prop['title'][0]['plain_text'] if firm_name_prop['title'] else ''
     else:
-        firm_name = firm_name_prop.get('plain_text', '')
+        firm_name = ''
     
     # Get website
     website = props.get('Website', {}).get('url', '')
-    
-    # If website empty and this is a restart, fetch full page from Notion
-    if not website and is_restart and page_id:
-        logger.info(f"Fetching full page for restart: {page_id}")
-        page = get_notion_page(page_id)
-        if page:
-            props = page.get('properties', {})
-            website = props.get('Website', {}).get('url', '')
-            # Also get firm name if we didn't have it
-            if not firm_name:
-                firm_name_prop = props.get('Firm Name', {})
-                if firm_name_prop.get('title'):
-                    firm_name = firm_name_prop['title'][0]['plain_text'] if firm_name_prop['title'] else ''
     
     if not website:
         logger.warning(f"No website provided for firm: {firm_name}")
         return jsonify({'error': 'No website/domain provided'}), 400
     
-    if not page_id:
-        logger.warning("No page ID in webhook payload")
-        return jsonify({'error': 'No page ID provided'}), 400
-    
     # Extract domain from URL
     domain = website.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
+    
+    logger.info(f"Processing firm: {firm_name}, website: {website}, restart: {is_restart}")
     
     # Prepare payload for Clay
     clay_payload = {
@@ -242,7 +239,6 @@ def handle_notion_new_firm():
     else:
         logger.warning("CLAY_FIRM_WEBHOOK_URL not configured")
         return jsonify({'error': 'Clay webhook not configured'}), 500
-
 
 # =============================================================================
 # CLAY → RAILWAY: Firm Enriched (Basic)
