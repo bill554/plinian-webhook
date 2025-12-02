@@ -136,6 +136,7 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'service': 'plinian-enrichment',
+        'version': '2.1.0',
         'endpoints': [
             '/webhook/notion/new-firm',
             '/webhook/clay/firm-enriched',
@@ -240,6 +241,7 @@ def handle_notion_new_firm():
         logger.warning("CLAY_FIRM_WEBHOOK_URL not configured")
         return jsonify({'error': 'Clay webhook not configured'}), 500
 
+
 # =============================================================================
 # CLAY → RAILWAY: Firm Enriched (Basic)
 # =============================================================================
@@ -341,9 +343,10 @@ Provide what you know about:
 3. Asset allocation approach (what do they invest in?)
 4. Do they allocate to: Real Estate? Private Equity? Public Equities? Alternatives?
 5. Investment style (core, value-add, opportunistic, growth, etc.)
-6. Geographic focus
-7. Any notable investment preferences or constraints
-8. Key investment staff if known
+6. Geographic focus or restrictions
+7. Typical check sizes or fund size preferences
+8. Any notable investment preferences, constraints, or red flags
+9. Key investment staff if known
 
 If you don't have information on this firm, say "Limited information available" and provide any reasonable inferences based on the firm type and website.
 
@@ -374,73 +377,87 @@ CLAY ENRICHMENT DATA:
 CLAUDE INDEPENDENT RESEARCH:
 {claude_research}
 
-SCORING PHILOSOPHY:
-- Most diversified institutional allocators (pensions, E&Fs, family offices) have broad mandates that include real estate and private equity
-- Default to MODERATE fit if they have the relevant asset class allocation, even without specific sub-sector signals
-- Upgrade to STRONG if there are explicit positive signals
-- Only mark WEAK if there are mismatches or very limited allocations
-- Only mark N/A if truly incompatible (e.g., public equity only, no alternatives)
+SCORING FRAMEWORK:
+- STRONG: Explicit positive signals matching strategy specifics
+- MODERATE: Has relevant asset class allocation + no disqualifying signals + plausible fit
+- WEAK: Has asset class BUT disqualifying signals present (wrong geography, wrong style, wrong size, etc.)
+- N/A: Does not invest in that asset class at all
 
 SCORE EACH CLIENT:
 
-1. STONERIVER (Multifamily Real Estate - Southeast US, Value-Add):
-   - STRONG if: Value-add or opportunistic appetite, vertically integrated preference, explicit multifamily interest, co-invest opportunities
-   - MODERATE if: Has real estate allocation (most diversified allocators do), invests in private RE generally
-   - WEAK if: Core-only mandate, gateway cities only, very small RE allocation
-   - N/A if: No real estate allocation at all
+1. STONERIVER (Multifamily Real Estate - Southeast US, Value-Add, $200M Fund)
+   Target: $5M-$25M checks, value-add/development tolerance, Sunbelt/secondary markets
+   
+   STRONG signals: Sunbelt/Southeast interest, value-add appetite, multifamily interest, middle-market RE preference, vertically-integrated manager preference
+   MODERATE: Has RE allocation, no geographic restrictions stated, open to value-add or opportunistic
+   WEAK signals: Core-only mandate, gateway/Tier-1 cities only, large-cap only (>$500M GP relationships), explicitly avoids development risk, industrial/office-only focus
+   N/A: No real estate allocation
 
-2. ASHTON GRAY (Healthcare-Anchored Retail Real Estate - Stabilized Income):
-   - STRONG if: Retail real estate interest, income/core+ focus, NNN or retail experience
-   - MODERATE if: Has real estate allocation, seeks income/yield, diversified RE exposure
-   - WEAK if: Explicitly avoids retail, development-only focus
-   - N/A if: No real estate allocation at all
+2. ASHTON GRAY (Healthcare-Anchored Last-Mile Retail Real Estate - Stabilized Income, Evergreen Fund)
+   Target: Income-seeking, core/core+ tolerance, 2-year lockup acceptable
+   
+   STRONG signals: Income/core+ focus, NNN experience, medical office/retail exposure, yield-focused
+   MODERATE: Has RE allocation, seeks income/yield/distributions, diversified property type exposure
+   WEAK signals: Explicitly avoids retail, development-only focus, opportunistic-only mandate, requires quarterly liquidity
+   N/A: No real estate allocation
 
-3. WILLOW CREST (Inflation-Linked Structural Alpha - Long Duration):
-   - STRONG if: Real assets mandate, inflation protection interest, 10-20yr horizon tolerance, $50M+ checks
-   - MODERATE if: Has real assets/alternatives allocation, diversified institutional investor
-   - WEAK if: Short duration focus, liquidity constraints, small ticket sizes
-   - N/A if: No alternatives/real assets allocation
+3. WILLOW CREST (Inflation-Linked Structural Alpha - Long Duration 10-20yr)
+   Target: $50M-$200M+ checks, patient capital, real assets/inflation mandate
+   
+   STRONG signals: Explicit real assets/inflation mandate, 10+ year horizon tolerance, $50M+ typical tickets, interest in non-correlated/structural alpha
+   MODERATE: Has alternatives/real assets allocation, long-duration capital, diversified institutional investor with $25M+ capacity
+   WEAK signals: Short duration focus (<5yr), strict liquidity requirements, small tickets (<$25M), hedge fund or liquid alts only focus
+   N/A: No alternatives/real assets allocation, public markets only
 
-4. ICW HOLDINGS (Global Macro-Driven Public Equities):
-   - STRONG if: Global equity mandate, macro-aware investing, risk-managed equity interest
-   - MODERATE if: Has public equity allocation, diversified portfolio approach
-   - WEAK if: Passive/index only, single region focus
-   - N/A if: Private markets only, no public equity
+4. ICW HOLDINGS (Global Macro-Driven Public Equities - Long Only, Monthly Liquidity)
+   Target: Global equity allocators, macro-aware, active management tolerance
+   
+   STRONG signals: Global/ACWI equity mandate, macro-aware or regime-aware investing interest, risk-managed equity preference, active management
+   MODERATE: Has meaningful public equity allocation, diversified multi-asset approach, open to active managers
+   WEAK signals: Passive/index only policy, single-region mandates (US-only, EM-only), hedge fund structures only
+   N/A: Private markets only, no public equity allocation
 
-5. HIGHMOUNT (Sports & Entertainment Growth PE):
-   - STRONG if: Growth PE mandate, media/entertainment/sports interest, consumer/TMT focus
-   - MODERATE if: Has private equity allocation, growth equity experience, diversified PE program
-   - WEAK if: Buyout-only, very narrow sector focus excluding consumer/media
-   - N/A if: No private equity allocation
+5. HIGHMOUNT (Sports & Entertainment Growth PE - Pre-Launch Fund)
+   Target: $50M-$250M checks, growth PE tolerance, consumer/media/entertainment interest
+   
+   STRONG signals: Growth PE mandate, media/entertainment/sports sector interest, consumer/TMT focus, experience backing new/emerging managers
+   MODERATE: Has private equity allocation, growth equity experience, diversified PE program open to thematic strategies
+   WEAK signals: Buyout-only mandate, requires established track record (no emerging managers), narrow sector focus excluding consumer/media, small tickets (<$25M)
+   N/A: No private equity allocation
 
-6. CO-INVEST PLATFORM (Direct Private Deals - Variable):
-   - STRONG if: Direct co-invest capability, flexible mandate, fast decision process, experienced deal team
-   - MODERATE if: Has alternatives allocation, some direct investment experience
-   - WEAK if: Fund-only investor, slow IC process, needs lead sponsor
-   - N/A if: No alternatives capability
+6. CO-INVEST PLATFORM (Direct Private Deals - Variable Structure/Sector)
+   Target: Direct investing capability, flexible mandates, fast decision process
+   
+   STRONG signals: Explicit direct/co-invest capability, dedicated deal team, flexible cross-sector mandate, history of direct transactions, fast IC process
+   MODERATE: Has alternatives allocation, some direct investment experience or interest, reasonable decision timeline
+   WEAK signals: Strictly fund-only investor policy, slow IC process (12+ months), requires lead GP sponsor, narrow sector restrictions
+   N/A: No alternatives capability, public markets only
 
-IMPORTANT GUIDANCE:
-- Pensions, endowments, foundations, and large family offices typically have BOTH real estate AND private equity allocations
-- If research shows diversified alternatives program → default to MODERATE for StoneRiver, Ashton Gray, Highmount, and Co-Invest
-- Be generous with MODERATE - these are qualified institutional allocators worth a conversation
-- Reserve WEAK/N/A for clear mismatches, not absence of specific signals
+CRITICAL GUIDANCE:
+- Do NOT default to Moderate just because they have the asset class
+- Actively look for WEAK signals - geography mismatches, style mismatches, size mismatches
+- If you see disqualifying signals, mark WEAK even if they technically allocate to the asset class
+- Reserve MODERATE for allocators where fit is genuinely plausible with no red flags
+- When research is limited, lean toward MODERATE only if firm type suggests likely fit (e.g., large pension likely has RE + PE)
+- Small family offices (<$500M) without clear direct capability → likely WEAK for Co-Invest
+- Large diversified institutions (pensions, mega-endowments) with no specific red flags → MODERATE across most strategies
 
 Return your analysis as JSON:
 {{
     "stoneriver_fit": "Strong/Moderate/Weak/N/A",
-    "stoneriver_rationale": "brief reason",
+    "stoneriver_rationale": "brief reason citing specific signals",
     "ashtongray_fit": "Strong/Moderate/Weak/N/A", 
-    "ashtongray_rationale": "brief reason",
+    "ashtongray_rationale": "brief reason citing specific signals",
     "willowcrest_fit": "Strong/Moderate/Weak/N/A",
-    "willowcrest_rationale": "brief reason",
+    "willowcrest_rationale": "brief reason citing specific signals",
     "icw_fit": "Strong/Moderate/Weak/N/A",
-    "icw_rationale": "brief reason",
+    "icw_rationale": "brief reason citing specific signals",
     "highmount_fit": "Strong/Moderate/Weak/N/A",
-    "highmount_rationale": "brief reason",
+    "highmount_rationale": "brief reason citing specific signals",
     "coinvest_fit": "Strong/Moderate/Weak/N/A",
-    "coinvest_rationale": "brief reason",
+    "coinvest_rationale": "brief reason citing specific signals",
     "best_match": "client name with strongest fit",
-    "overall_notes": "1-2 sentence summary of allocator profile and recommended approach"
+    "overall_notes": "1-2 sentence summary of allocator profile and key considerations"
 }}
 
 Return ONLY valid JSON, no markdown fences or other text."""
