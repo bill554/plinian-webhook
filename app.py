@@ -1,25 +1,35 @@
-from flask import Flask, request, jsonify
-import requests
+"""
+Plinian Enrichment Pipeline - Railway Flask Application
+Handles webhooks between Notion, Clay, and Claude for automated firm/contact enrichment.
+"""
+
 import os
+import hmac
+import hashlib
 import logging
 import json
-from datetime import datetime
+import requests
+from flask import Flask, request, jsonify
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Configuration
+# Environment variables
 NOTION_API_KEY = os.environ.get('NOTION_API_KEY')
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 CLAY_FIRM_WEBHOOK_URL = os.environ.get('CLAY_FIRM_WEBHOOK_URL')
 CLAY_PERSON_WEBHOOK_URL = os.environ.get('CLAY_PERSON_WEBHOOK_URL')
 RAILWAY_WEBHOOK_SECRET = os.environ.get('RAILWAY_WEBHOOK_SECRET')
 RAILWAY_PUBLIC_URL = os.environ.get('RAILWAY_PUBLIC_URL', '')
 
-PROSPECT_FIRMS_DB_ID = '2aec16a0-949c-802a-851e-de429d9503f4'
-PROSPECTS_DB_ID = '2aec16a0-949c-8061-9fdd-daabdc22d5e2'
+# Notion database IDs
+PROSPECT_FIRMS_DB = '2aec16a0-949c-802a-851e-de429d9503f4'
+PROSPECTS_DB = '2aec16a0-949c-8061-9fdd-daabdc22d5e2'
 
+# Notion API headers
 NOTION_HEADERS = {
     'Authorization': f'Bearer {NOTION_API_KEY}',
     'Content-Type': 'application/json',
@@ -28,357 +38,345 @@ NOTION_HEADERS = {
 
 
 def verify_webhook_signature(req):
+    """Verify webhook signature if secret is configured."""
     if not RAILWAY_WEBHOOK_SECRET:
         return True
+    
     signature = req.headers.get('X-Webhook-Signature', '')
-    return signature == RAILWAY_WEBHOOK_SECRET
-
-
-def extract_domain(website_url):
-    if not website_url:
-        return None
-    domain = website_url.lower()
-    domain = domain.replace('https://', '').replace('http://', '')
-    domain = domain.replace('www.', '')
-    domain = domain.split('/')[0]
-    return domain
+    if not signature:
+        return True  # Allow unsigned requests (from Notion automations)
+    
+    payload = req.get_data()
+    expected = hmac.new(
+        RAILWAY_WEBHOOK_SECRET.encode(),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(signature, expected)
 
 
 def get_notion_page(page_id):
-    url = f'https://api.notion.com/v1/pages/{page_id}'
-    response = requests.get(url, headers=NOTION_HEADERS)
-    if response.status_code == 200:
+    """Fetch a Notion page by ID."""
+    try:
+        url = f'https://api.notion.com/v1/pages/{page_id}'
+        response = requests.get(url, headers=NOTION_HEADERS)
+        response.raise_for_status()
         return response.json()
-    logger.error(f"Failed to fetch Notion page: {response.status_code}")
-    return None
+    except Exception as e:
+        logger.error(f"Failed to get Notion page {page_id}: {e}")
+        return None
 
 
 def update_notion_page(page_id, properties):
-    url = f'https://api.notion.com/v1/pages/{page_id}'
-    payload = {'properties': properties}
-    response = requests.patch(url, headers=NOTION_HEADERS, json=payload)
-    if response.status_code == 200:
+    """Update a Notion page with given properties."""
+    try:
+        url = f'https://api.notion.com/v1/pages/{page_id}'
+        payload = {'properties': properties}
+        response = requests.patch(url, headers=NOTION_HEADERS, json=payload)
+        response.raise_for_status()
+        logger.info(f"Updated Notion page {page_id}")
         return response.json()
-    logger.error(f"Failed to update Notion page: {response.status_code} - {response.text}")
-    return None
+    except Exception as e:
+        logger.error(f"Failed to update Notion page {page_id}: {e}")
+        return None
 
 
 def create_notion_page(database_id, properties):
-    url = 'https://api.notion.com/v1/pages'
-    payload = {
-        'parent': {'database_id': database_id},
-        'properties': properties
-    }
-    response = requests.post(url, headers=NOTION_HEADERS, json=payload)
-    if response.status_code == 200:
+    """Create a new page in a Notion database."""
+    try:
+        url = 'https://api.notion.com/v1/pages'
+        payload = {
+            'parent': {'database_id': database_id},
+            'properties': properties
+        }
+        response = requests.post(url, headers=NOTION_HEADERS, json=payload)
+        response.raise_for_status()
+        logger.info(f"Created Notion page in {database_id}")
         return response.json()
-    logger.error(f"Failed to create Notion page: {response.status_code} - {response.text}")
-    return None
+    except Exception as e:
+        logger.error(f"Failed to create Notion page: {e}")
+        return None
 
 
-def send_to_clay_firm_table(data):
-    if not CLAY_FIRM_WEBHOOK_URL:
-        logger.error("CLAY_FIRM_WEBHOOK_URL not configured")
-        return False
-    callback_url = f"{RAILWAY_PUBLIC_URL}/webhook/clay/firm-enriched"
-    payload = {
-        'notion_page_id': data.get('page_id'),
-        'firm_name': data.get('firm_name'),
-        'domain': data.get('domain'),
-        'website': data.get('website'),
-        'callback_url': callback_url
-    }
-    logger.info(f"Sending to Clay firm table: {payload}")
-    response = requests.post(CLAY_FIRM_WEBHOOK_URL, json=payload)
-    if response.status_code in [200, 201, 202]:
-        logger.info("Successfully sent to Clay")
+def query_notion_database(database_id, filter_obj=None):
+    """Query a Notion database with optional filter."""
+    try:
+        url = f'https://api.notion.com/v1/databases/{database_id}/query'
+        payload = {}
+        if filter_obj:
+            payload['filter'] = filter_obj
+        response = requests.post(url, headers=NOTION_HEADERS, json=payload)
+        response.raise_for_status()
+        return response.json().get('results', [])
+    except Exception as e:
+        logger.error(f"Failed to query Notion database {database_id}: {e}")
+        return []
+
+
+def send_to_clay(webhook_url, data):
+    """Send data to a Clay webhook."""
+    try:
+        response = requests.post(webhook_url, json=data, timeout=30)
+        response.raise_for_status()
+        logger.info(f"Sent to Clay: {data.get('firm_name', data.get('name', 'unknown'))}")
         return True
-    logger.error(f"Failed to send to Clay: {response.status_code}")
-    return False
-
-
-def send_to_clay_person_table(data):
-    if not CLAY_PERSON_WEBHOOK_URL:
-        logger.error("CLAY_PERSON_WEBHOOK_URL not configured")
+    except Exception as e:
+        logger.error(f"Failed to send to Clay: {e}")
         return False
-    callback_url = f"{RAILWAY_PUBLIC_URL}/webhook/clay/person-enriched"
-    payload = {
-        'notion_page_id': data.get('page_id'),
-        'full_name': data.get('full_name'),
-        'company_domain': data.get('company_domain'),
-        'company_name': data.get('company_name'),
-        'linkedin_url': data.get('linkedin_url'),
-        'callback_url': callback_url
-    }
-    logger.info(f"Sending to Clay person table: {payload}")
-    response = requests.post(CLAY_PERSON_WEBHOOK_URL, json=payload)
-    if response.status_code in [200, 201, 202]:
-        logger.info("Successfully sent to Clay")
-        return True
-    logger.error(f"Failed to send to Clay: {response.status_code}")
-    return False
 
 
-@app.route('/health', methods=['GET'])
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
+
+@app.route('/', methods=['GET'])
 def health_check():
+    """Health check endpoint."""
     return jsonify({
         'status': 'healthy',
-        'service': 'plinian-enrichment-webhook',
-        'timestamp': datetime.utcnow().isoformat()
+        'service': 'plinian-enrichment',
+        'endpoints': [
+            '/webhook/notion/new-firm',
+            '/webhook/clay/firm-enriched',
+            '/webhook/clay/firm-score',
+            '/webhook/clay/person-enriched'
+        ]
     })
 
 
-@app.route('/routes', methods=['GET'])
-def list_routes():
-    routes = []
-    for rule in app.url_map.iter_rules():
-        routes.append({
-            'endpoint': rule.endpoint,
-            'methods': list(rule.methods - {'HEAD', 'OPTIONS'}),
-            'path': rule.rule
-        })
-    return jsonify({'routes': routes})
+@app.route('/health', methods=['GET'])
+def health():
+    """Alternative health check."""
+    return jsonify({'status': 'ok'})
 
+
+# =============================================================================
+# NOTION → RAILWAY: New Firm Added
+# =============================================================================
 
 @app.route('/webhook/notion/new-firm', methods=['POST'])
 def handle_notion_new_firm():
+    """
+    Triggered when a new firm is added to Prospect Firms in Notion.
+    Sends firm to Clay for enrichment.
+    """
     if not verify_webhook_signature(request):
         return jsonify({'error': 'Invalid signature'}), 401
     
-    payload = request.json
-    logger.info(f"Received new firm webhook: {payload}")
+    data = request.json or {}
+    logger.info(f"Received new firm webhook: {json.dumps(data)[:500]}")
     
-    # Handle Notion's nested payload structure
-    if 'data' in payload and isinstance(payload['data'], dict):
-        # Notion automation format
-        page_data = payload['data']
-        page_id = page_data.get('id')
-        props = page_data.get('properties', {})
-        
-        # Extract firm name
-        firm_name = ''
-        if props.get('Firm Name', {}).get('title'):
-            title_arr = props['Firm Name']['title']
-            if title_arr:
-                firm_name = title_arr[0].get('plain_text', '')
-        
-        # Extract website
-        website = props.get('Website', {}).get('url', '')
-        
-        # Check if this is a restart trigger
-        is_restart = False
-        if props.get('Restart Enrichment', {}).get('checkbox'):
-            is_restart = True
-            
+    # Handle Notion automation payload structure
+    if 'data' in data:
+        data = data['data']
+    
+    # Extract page ID and properties
+    page_id = data.get('id', '')
+    props = data.get('properties', {})
+    
+    # Detect restart trigger
+    is_restart = False
+    if props.get('Restart Enrichment', {}).get('checkbox'):
+        is_restart = True
+        logger.info(f"Restart enrichment triggered for page {page_id}")
+    
+    # Get firm name - handle both title array and plain text
+    firm_name_prop = props.get('Firm Name', {})
+    if firm_name_prop.get('title'):
+        firm_name = firm_name_prop['title'][0]['plain_text'] if firm_name_prop['title'] else ''
     else:
-        # Simple flat format (for manual testing)
-        page_id = payload.get('page_id')
-        firm_name = payload.get('firm_name')
-        website = payload.get('website')
-        is_restart = False
+        firm_name = firm_name_prop.get('plain_text', '')
     
-    if not page_id:
-        return jsonify({'error': 'Missing page_id'}), 400
+    # Get website
+    website = props.get('Website', {}).get('url', '')
     
-    # If website empty, try to fetch from Notion page directly
-    if not website:
+    # If website empty and this is a restart, fetch full page from Notion
+    if not website and is_restart and page_id:
+        logger.info(f"Fetching full page for restart: {page_id}")
         page = get_notion_page(page_id)
         if page:
             props = page.get('properties', {})
             website = props.get('Website', {}).get('url', '')
-            if not firm_name and props.get('Firm Name', {}).get('title'):
-                title_arr = props['Firm Name']['title']
-                if title_arr:
-                    firm_name = title_arr[0].get('plain_text', '')
+            # Also get firm name if we didn't have it
+            if not firm_name:
+                firm_name_prop = props.get('Firm Name', {})
+                if firm_name_prop.get('title'):
+                    firm_name = firm_name_prop['title'][0]['plain_text'] if firm_name_prop['title'] else ''
     
-    domain = extract_domain(website)
+    if not website:
+        logger.warning(f"No website provided for firm: {firm_name}")
+        return jsonify({'error': 'No website/domain provided'}), 400
     
-    if not domain:
-        logger.warning(f"No domain found for firm {firm_name}")
-        return jsonify({'error': 'No website/domain provided', 'firm': firm_name}), 400
+    if not page_id:
+        logger.warning("No page ID in webhook payload")
+        return jsonify({'error': 'No page ID provided'}), 400
     
-    clay_data = {
-        'page_id': page_id,
+    # Extract domain from URL
+    domain = website.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
+    
+    # Prepare payload for Clay
+    clay_payload = {
+        'notion_page_id': page_id,
         'firm_name': firm_name,
+        'website': website,
         'domain': domain,
-        'website': website
+        'callback_url': f"{RAILWAY_PUBLIC_URL}/webhook/clay/firm-enriched"
     }
     
-    success = send_to_clay_firm_table(clay_data)
-    
-    if success:
-        # Update status and uncheck restart if needed
-        updates = {
-            'Research Status': {'select': {'name': 'Researching'}}
-        }
-        if is_restart:
-            updates['Restart Enrichment'] = {'checkbox': False}
-        
-        update_notion_page(page_id, updates)
-        return jsonify({'status': 'sent_to_clay', 'firm': firm_name, 'restart': is_restart})
+    # Send to Clay
+    if CLAY_FIRM_WEBHOOK_URL:
+        success = send_to_clay(CLAY_FIRM_WEBHOOK_URL, clay_payload)
+        if success:
+            # Update status in Notion
+            updates = {
+                'Research Status': {'select': {'name': 'Researching'}}
+            }
+            # Uncheck restart if this was a restart trigger
+            if is_restart:
+                updates['Restart Enrichment'] = {'checkbox': False}
+            update_notion_page(page_id, updates)
+            return jsonify({'status': 'sent_to_clay', 'firm': firm_name})
+        else:
+            return jsonify({'error': 'Failed to send to Clay'}), 500
     else:
-        return jsonify({'error': 'Failed to send to Clay'}), 500
+        logger.warning("CLAY_FIRM_WEBHOOK_URL not configured")
+        return jsonify({'error': 'Clay webhook not configured'}), 500
 
-@app.route('/webhook/enrich-person', methods=['POST'])
-def handle_enrich_person():
-    data = request.json
-    logger.info(f"Received person enrichment request: {data}")
-    page_id = data.get('page_id')
-    full_name = data.get('full_name')
-    company_domain = data.get('company_domain')
-    company_name = data.get('company_name')
-    linkedin_url = data.get('linkedin_url')
-    if not page_id or not full_name:
-        return jsonify({'error': 'Missing page_id or full_name'}), 400
-    clay_data = {
-        'page_id': page_id,
-        'full_name': full_name,
-        'company_domain': company_domain,
-        'company_name': company_name,
-        'linkedin_url': linkedin_url
-    }
-    success = send_to_clay_person_table(clay_data)
-    if success:
-        update_notion_page(page_id, {
-            'Status': {'select': {'name': 'Enriching'}}
-        })
-        return jsonify({'status': 'sent_to_clay', 'person': full_name})
-    else:
-        return jsonify({'error': 'Failed to send to Clay'}), 500
 
+# =============================================================================
+# CLAY → RAILWAY: Firm Enriched (Basic)
+# =============================================================================
 
 @app.route('/webhook/clay/firm-enriched', methods=['POST'])
-def handle_clay_firm_enriched():
-    data = request.json
-    logger.info(f"Received enriched firm data from Clay: {data}")
+def handle_firm_enriched():
+    """
+    Receives enriched firm data from Clay.
+    Updates Notion with basic firmographic data.
+    """
+    data = request.json or {}
+    logger.info(f"Received enriched firm: {json.dumps(data)[:500]}")
+    
     notion_page_id = data.get('notion_page_id')
     if not notion_page_id:
-        return jsonify({'error': 'Missing notion_page_id'}), 400
-    firm_updates = {}
-    if data.get('company_linkedin_url'):
-        firm_updates['LinkedIn Company URL'] = {'url': data['company_linkedin_url']}
-    if data.get('description'):
-        description = data['description'][:2000]
-        firm_updates['Firm Overview'] = {'rich_text': [{'text': {'content': description}}]}
-    if data.get('headquarters'):
-        firm_updates['Location / Headquarters Location'] = {
-            'rich_text': [{'text': {'content': data['headquarters']}}]
+        return jsonify({'error': 'No notion_page_id provided'}), 400
+    
+    # Build Notion update payload
+    updates = {}
+    
+    # Map Clay fields to Notion properties
+    if data.get('linkedin_url'):
+        updates['LinkedIn Company URL'] = {'url': data['linkedin_url']}
+    
+    if data.get('location'):
+        updates['Location / Headquarters Location'] = {
+            'rich_text': [{'text': {'content': str(data['location'])[:2000]}}]
         }
-    people = data.get('people', [])
-    if people:
-        firm_updates['Contacts Identified'] = {'number': len(people)}
-    firm_updates['Research Status'] = {'select': {'name': 'Qualified'}}
-    if firm_updates:
-        update_notion_page(notion_page_id, firm_updates)
-    for person in people:
-        prospect_properties = {
-            'Name': {'title': [{'text': {'content': person.get('name', 'Unknown')}}]},
-            'Company': {'rich_text': [{'text': {'content': data.get('firm_name', '')}}]},
-            'Title/Role': {'rich_text': [{'text': {'content': person.get('title', '')}}]},
-            'Status': {'select': {'name': 'New'}}
+    
+    if data.get('firm_overview'):
+        updates['Firm Overview'] = {
+            'rich_text': [{'text': {'content': str(data['firm_overview'])[:2000]}}]
         }
-        if person.get('linkedin_url'):
-            prospect_properties['LinkedIn URL'] = {'url': person['linkedin_url']}
-        created = create_notion_page(PROSPECTS_DB_ID, prospect_properties)
-        if created:
-            logger.info(f"Created prospect: {person.get('name')}")
+    
+    if data.get('employee_count'):
+        # Could map to a field if we add one
+        pass
+    
+    # Update Notion if we have updates
+    if updates:
+        update_notion_page(notion_page_id, updates)
+    
     return jsonify({
         'status': 'success',
-        'firm_updated': notion_page_id,
-        'prospects_created': len(people)
+        'page_id': notion_page_id,
+        'updates_applied': list(updates.keys())
     })
 
 
-@app.route('/webhook/clay/person-enriched', methods=['POST'])
-def handle_clay_person_enriched():
-    data = request.json
-    logger.info(f"Received enriched person data from Clay: {data}")
+# =============================================================================
+# CLAY → RAILWAY: Firm Scoring (with Claude Independent Research)
+# =============================================================================
+
+@app.route('/webhook/clay/firm-score', methods=['POST'])
+def handle_firm_scoring():
+    """
+    Receives firm data from Clay for scoring.
+    Claude does independent research, then combines with Clay data for scoring.
+    Updates Notion with fit scores per client.
+    """
+    data = request.json or {}
     
-    prospect_properties = {
-        'Name': {'title': [{'text': {'content': data.get('full_name', 'Unknown')}}]},
-        'Company': {'rich_text': [{'text': {'content': data.get('company_name', '')}}]},
-        'Status': {'select': {'name': 'Qualified' if data.get('email') else 'New'}}
-    }
+    notion_page_id = data.get('notion_page_id')
+    firm_name = data.get('firm_name')
+    website = data.get('website', '')
     
-    if data.get('email'):
-        prospect_properties['Email'] = {'email': data['email']}
+    # Get research from query param OR body
+    firm_research = request.args.get('research', '') or data.get('firm_research', '')
     
-    if data.get('linkedin_url'):
-        prospect_properties['LinkedIn URL'] = {'url': data['linkedin_url']}
+    # Sanitize research text
+    if firm_research:
+        firm_research = str(firm_research).replace('\n', ' ').replace('\r', ' ')[:5000]
     
-    if data.get('title'):
-        prospect_properties['Title/Role'] = {'rich_text': [{'text': {'content': data['title']}}]}
+    logger.info(f"Received firm for scoring: {firm_name}, research length: {len(firm_research)}")
     
-    created = create_notion_page(PROSPECTS_DB_ID, prospect_properties)
+    if not notion_page_id:
+        return jsonify({'error': 'No notion_page_id provided'}), 400
     
-    if created:
-        logger.info(f"Created prospect: {data.get('full_name')}")
-        return jsonify({
-            'status': 'success',
-            'prospect_created': data.get('full_name'),
-            'email_found': bool(data.get('email'))
-        })
-    else:
-        return jsonify({'error': 'Failed to create prospect'}), 500
+    if not ANTHROPIC_API_KEY:
+        logger.error("ANTHROPIC_API_KEY not configured")
+        return jsonify({'error': 'Anthropic API key not configured'}), 500
+    
+    import anthropic
+    
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        
+        # =====================================================================
+        # STEP 1: Claude Independent Research
+        # =====================================================================
+        research_prompt = f"""You are an expert on institutional investors and asset allocators. Research this firm from your knowledge:
 
+FIRM: {firm_name}
+WEBSITE: {website}
 
-@app.route('/test/enrich-firm/<page_id>', methods=['GET'])
-def test_enrich_firm(page_id):
-    page = get_notion_page(page_id)
-    if not page:
-        return jsonify({'error': 'Page not found'}), 404
-    props = page.get('properties', {})
-    firm_name = ''
-    if props.get('Firm Name', {}).get('title'):
-        firm_name = props['Firm Name']['title'][0]['text']['content']
-    website = props.get('Website', {}).get('url', '')
-    domain = extract_domain(website)
-    clay_data = {
-        'page_id': page_id,
-        'firm_name': firm_name,
-        'domain': domain,
-        'website': website
-    }
-    success = send_to_clay_firm_table(clay_data)
-    return jsonify({
-        'status': 'sent' if success else 'failed',
-        'data': clay_data
-    })
+Provide what you know about:
+1. What type of organization is this? (pension, endowment, foundation, family office, RIA, OCIO, etc.)
+2. Approximate AUM if known
+3. Asset allocation approach (what do they invest in?)
+4. Do they allocate to: Real Estate? Private Equity? Public Equities? Alternatives?
+5. Investment style (core, value-add, opportunistic, growth, etc.)
+6. Geographic focus
+7. Any notable investment preferences or constraints
+8. Key investment staff if known
 
+If you don't have information on this firm, say "Limited information available" and provide any reasonable inferences based on the firm type and website.
 
-@app.route('/test/enrich-person/<page_id>', methods=['GET'])
-def test_enrich_person(page_id):
-    page = get_notion_page(page_id)
-    if not page:
-        return jsonify({'error': 'Page not found'}), 404
-    props = page.get('properties', {})
-    full_name = ''
-    if props.get('Name', {}).get('title'):
-        full_name = props['Name']['title'][0]['text']['content']
-    company_name = ''
-    if props.get('Company', {}).get('rich_text'):
-        company_name = props['Company']['rich_text'][0]['text']['content']
-    linkedin_url = props.get('LinkedIn URL', {}).get('url', '')
-    clay_data = {
-        'page_id': page_id,
-        'full_name': full_name,
-        'company_name': company_name,
-        'company_domain': '',
-        'linkedin_url': linkedin_url
-    }
-    success = send_to_clay_person_table(clay_data)
-    return jsonify({
-        'status': 'sent' if success else 'failed',
-        'data': clay_data
-    })
+Be concise but comprehensive. Focus on investment-relevant details."""
 
+        research_response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[
+                {"role": "user", "content": research_prompt}
+            ]
+        )
+        
+        claude_research = research_response.content[0].text
+        logger.info(f"Claude independent research completed for {firm_name}: {len(claude_research)} chars")
+        
+        # =====================================================================
+        # STEP 2: Combined Scoring with Both Research Sources
+        # =====================================================================
+        scoring_prompt = f"""You are an expert institutional capital raising advisor. Analyze this allocator firm and score their fit for each of our 6 clients.
 
-scoring_prompt = f"""You are an expert institutional capital raising advisor. Analyze this allocator firm and score their fit for each of our 6 clients.
+FIRM: {firm_name}
+WEBSITE: {website}
 
-FIRM INFORMATION:
-- Name: {firm_name}
-- Website: {website}
-- Research: {firm_research}
+CLAY ENRICHMENT DATA:
+{firm_research if firm_research else "No enrichment data provided"}
+
+CLAUDE INDEPENDENT RESEARCH:
+{claude_research}
 
 SCORING PHILOSOPHY:
 - Most diversified institutional allocators (pensions, E&Fs, family offices) have broad mandates that include real estate and private equity
@@ -390,13 +388,13 @@ SCORING PHILOSOPHY:
 SCORE EACH CLIENT:
 
 1. STONERIVER (Multifamily Real Estate - Southeast US, Value-Add):
-   - STRONG if: Value-add appetite, vertically integrated preference, explicit multifamily interest
+   - STRONG if: Value-add or opportunistic appetite, vertically integrated preference, explicit multifamily interest, co-invest opportunities
    - MODERATE if: Has real estate allocation (most diversified allocators do), invests in private RE generally
    - WEAK if: Core-only mandate, gateway cities only, very small RE allocation
    - N/A if: No real estate allocation at all
 
 2. ASHTON GRAY (Healthcare-Anchored Retail Real Estate - Stabilized Income):
-   - STRONG if: Real estate interest, income/core+ focus, NNN or retail experience, appropriate size
+   - STRONG if: Retail real estate interest, income/core+ focus, NNN or retail experience
    - MODERATE if: Has real estate allocation, seeks income/yield, diversified RE exposure
    - WEAK if: Explicitly avoids retail, development-only focus
    - N/A if: No real estate allocation at all
@@ -451,21 +449,16 @@ Return your analysis as JSON:
 
 Return ONLY valid JSON, no markdown fences or other text."""
 
-    import anthropic
-    
-    try:
-        client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
-        
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=2048,
+            max_tokens=1024,
             messages=[
                 {"role": "user", "content": scoring_prompt}
             ]
         )
         
         response_text = message.content[0].text
-        logger.info(f"Claude scoring response: {response_text[:500]}...")
+        logger.info(f"Claude scoring response: {response_text[:500]}")
         
         # Strip markdown code fences if present
         clean_response = response_text.strip()
@@ -492,7 +485,7 @@ Return ONLY valid JSON, no markdown fences or other text."""
             else:
                 return 'N/A'
         
-        # Update Notion with scores
+        # Build Notion update payload
         notion_updates = {
             'StoneRiver Fit': {'select': {'name': normalize_fit(scores.get('stoneriver_fit'))}},
             'Ashton Gray Fit': {'select': {'name': normalize_fit(scores.get('ashtongray_fit'))}},
@@ -503,50 +496,247 @@ Return ONLY valid JSON, no markdown fences or other text."""
             'Research Status': {'select': {'name': 'Qualified'}}
         }
         
-        # Build qualification notes with rationales
+        # Build Qualification Notes with rationales
         rationale = f"""Best Match: {scores.get('best_match', 'TBD')}
 
-STONERIVER: {scores.get('stoneriver_rationale', '')}
-
-ASHTON GRAY: {scores.get('ashtongray_rationale', '')}
-
-WILLOW CREST: {scores.get('willowcrest_rationale', '')}
-
+StoneRiver: {scores.get('stoneriver_rationale', '')}
+Ashton Gray: {scores.get('ashtongray_rationale', '')}
+Willow Crest: {scores.get('willowcrest_rationale', '')}
 ICW: {scores.get('icw_rationale', '')}
+Highmount: {scores.get('highmount_rationale', '')}
+Co-Invest: {scores.get('coinvest_rationale', '')}
 
-HIGHMOUNT: {scores.get('highmount_rationale', '')}
-
-CO-INVEST: {scores.get('coinvest_rationale', '')}
-
----
 {scores.get('overall_notes', '')}"""
         
         notion_updates['Qualification Notes'] = {
             'rich_text': [{'text': {'content': rationale[:2000]}}]
         }
         
-        update_result = update_notion_page(notion_page_id, notion_updates)
+        # Update Firm Overview with Claude's independent research
+        notion_updates['Firm Overview'] = {
+            'rich_text': [{'text': {'content': claude_research[:2000]}}]
+        }
         
-        if update_result:
-            logger.info(f"Successfully updated Notion with scores for {firm_name}")
-        else:
-            logger.error(f"Failed to update Notion for {firm_name}")
+        # Determine Best Matches multi-select
+        best_matches = []
+        fit_mapping = {
+            'stoneriver_fit': 'StoneRiver',
+            'ashtongray_fit': 'Ashton Gray',
+            'willowcrest_fit': 'Willow Crest',
+            'icw_fit': 'ICW',
+            'highmount_fit': 'Highmount',
+            'coinvest_fit': 'Co-Invests'
+        }
+        
+        for key, client_name in fit_mapping.items():
+            if normalize_fit(scores.get(key)) == 'Strong':
+                best_matches.append({'name': client_name})
+        
+        if best_matches:
+            notion_updates['Best Matches'] = {'multi_select': best_matches}
+        
+        # Update Notion
+        update_notion_page(notion_page_id, notion_updates)
         
         return jsonify({
             'status': 'success',
             'firm': firm_name,
-            'scores': scores
+            'scores': scores,
+            'claude_research_length': len(claude_research)
         })
         
     except json.JSONDecodeError as e:
-        logger.error(f"JSON parsing failed: {str(e)}")
+        logger.error(f"Failed to parse Claude response as JSON: {e}")
         logger.error(f"Raw response: {response_text}")
-        return jsonify({'error': f'JSON parsing failed: {str(e)}'}), 500
+        return jsonify({'error': 'Failed to parse scoring response', 'raw': response_text[:500]}), 500
     except Exception as e:
         logger.error(f"Claude scoring failed: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 
+# =============================================================================
+# CLAY → RAILWAY: Person Enriched
+# =============================================================================
+
+@app.route('/webhook/clay/person-enriched', methods=['POST'])
+def handle_person_enriched():
+    """
+    Receives enriched person/contact data from Clay.
+    Creates or updates Prospect record in Notion.
+    """
+    data = request.json or {}
+    logger.info(f"Received enriched person: {json.dumps(data)[:500]}")
+    
+    # Required fields
+    name = data.get('name', '').strip()
+    firm_name = data.get('firm_name', '').strip()
+    notion_firm_page_id = data.get('notion_page_id', '')
+    
+    if not name:
+        return jsonify({'error': 'No name provided'}), 400
+    
+    # Check if prospect already exists
+    existing = query_notion_database(
+        PROSPECTS_DB,
+        {
+            'and': [
+                {'property': 'Name', 'title': {'equals': name}},
+                {'property': 'Company', 'rich_text': {'contains': firm_name}}
+            ]
+        }
+    )
+    
+    # Build properties
+    properties = {
+        'Name': {'title': [{'text': {'content': name}}]},
+        'Company': {'rich_text': [{'text': {'content': firm_name}}]},
+        'Status': {'select': {'name': 'New'}}
+    }
+    
+    # Optional fields
+    if data.get('email'):
+        properties['Email'] = {'email': data['email']}
+    
+    if data.get('title'):
+        properties['Title/Role'] = {
+            'rich_text': [{'text': {'content': str(data['title'])[:2000]}}]
+        }
+    
+    if data.get('linkedin_url'):
+        properties['LinkedIn URL'] = {'url': data['linkedin_url']}
+    
+    if data.get('phone'):
+        properties['Mobile Phone'] = {'phone_number': data['phone']}
+    
+    if data.get('location'):
+        # Could add to notes or a location field
+        pass
+    
+    # Map organization type if provided
+    org_type = data.get('organization_type', '')
+    if org_type:
+        org_type_mapping = {
+            'pension': 'Public Pension',
+            'endowment': 'E&F',
+            'foundation': 'E&F',
+            'family office': 'Family Office',
+            'ria': 'RIA',
+            'ocio': 'OCIO',
+            'hospital': 'Hospital/Healthcare',
+            'healthcare': 'Hospital/Healthcare'
+        }
+        for key, notion_value in org_type_mapping.items():
+            if key in org_type.lower():
+                properties['Organization Type'] = {'select': {'name': notion_value}}
+                break
+    
+    if existing:
+        # Update existing prospect
+        page_id = existing[0]['id']
+        update_notion_page(page_id, properties)
+        return jsonify({
+            'status': 'updated',
+            'name': name,
+            'page_id': page_id
+        })
+    else:
+        # Create new prospect
+        result = create_notion_page(PROSPECTS_DB, properties)
+        if result:
+            return jsonify({
+                'status': 'created',
+                'name': name,
+                'page_id': result.get('id')
+            })
+        else:
+            return jsonify({'error': 'Failed to create prospect'}), 500
+
+
+# =============================================================================
+# MANUAL TRIGGER: Score Existing Firm
+# =============================================================================
+
+@app.route('/api/score-firm/<page_id>', methods=['POST'])
+def manual_score_firm(page_id):
+    """
+    Manually trigger scoring for an existing firm in Notion.
+    Useful for re-scoring or testing.
+    """
+    # Fetch the firm from Notion
+    page = get_notion_page(page_id)
+    if not page:
+        return jsonify({'error': 'Page not found'}), 404
+    
+    props = page.get('properties', {})
+    
+    # Extract firm name
+    firm_name_prop = props.get('Firm Name', {})
+    if firm_name_prop.get('title'):
+        firm_name = firm_name_prop['title'][0]['plain_text'] if firm_name_prop['title'] else ''
+    else:
+        firm_name = ''
+    
+    # Extract website
+    website = props.get('Website', {}).get('url', '')
+    
+    # Extract any existing overview as research
+    overview_prop = props.get('Firm Overview', {})
+    firm_research = ''
+    if overview_prop.get('rich_text'):
+        firm_research = overview_prop['rich_text'][0]['plain_text'] if overview_prop['rich_text'] else ''
+    
+    # Call the scoring endpoint internally
+    with app.test_client() as client:
+        response = client.post(
+            '/webhook/clay/firm-score',
+            json={
+                'notion_page_id': page_id,
+                'firm_name': firm_name,
+                'website': website,
+                'firm_research': firm_research
+            }
+        )
+        return response.get_json(), response.status_code
+
+
+# =============================================================================
+# UTILITY: List Recent Firms
+# =============================================================================
+
+@app.route('/api/firms/recent', methods=['GET'])
+def list_recent_firms():
+    """List recently added firms from Notion."""
+    firms = query_notion_database(PROSPECT_FIRMS_DB)
+    
+    result = []
+    for firm in firms[:20]:  # Limit to 20
+        props = firm.get('properties', {})
+        
+        # Extract firm name
+        firm_name_prop = props.get('Firm Name', {})
+        if firm_name_prop.get('title'):
+            firm_name = firm_name_prop['title'][0]['plain_text'] if firm_name_prop['title'] else ''
+        else:
+            firm_name = ''
+        
+        # Extract status
+        status_prop = props.get('Research Status', {})
+        status = status_prop.get('select', {}).get('name', '') if status_prop.get('select') else ''
+        
+        result.append({
+            'id': firm['id'],
+            'name': firm_name,
+            'status': status,
+            'url': firm.get('url', '')
+        })
+    
+    return jsonify({'firms': result})
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
