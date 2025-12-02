@@ -150,24 +150,46 @@ def handle_notion_new_firm():
     
     # Handle Notion's nested payload structure
     if 'data' in payload and isinstance(payload['data'], dict):
+        # Notion automation format
         page_data = payload['data']
         page_id = page_data.get('id')
         props = page_data.get('properties', {})
         
+        # Extract firm name
         firm_name = ''
         if props.get('Firm Name', {}).get('title'):
             title_arr = props['Firm Name']['title']
             if title_arr:
                 firm_name = title_arr[0].get('plain_text', '')
         
+        # Extract website
         website = props.get('Website', {}).get('url', '')
+        
+        # Check if this is a restart trigger
+        is_restart = False
+        if props.get('Restart Enrichment', {}).get('checkbox'):
+            is_restart = True
+            
     else:
+        # Simple flat format (for manual testing)
         page_id = payload.get('page_id')
         firm_name = payload.get('firm_name')
         website = payload.get('website')
+        is_restart = False
     
     if not page_id:
         return jsonify({'error': 'Missing page_id'}), 400
+    
+    # If website empty, try to fetch from Notion page directly
+    if not website:
+        page = get_notion_page(page_id)
+        if page:
+            props = page.get('properties', {})
+            website = props.get('Website', {}).get('url', '')
+            if not firm_name and props.get('Firm Name', {}).get('title'):
+                title_arr = props['Firm Name']['title']
+                if title_arr:
+                    firm_name = title_arr[0].get('plain_text', '')
     
     domain = extract_domain(website)
     
@@ -185,13 +207,17 @@ def handle_notion_new_firm():
     success = send_to_clay_firm_table(clay_data)
     
     if success:
-        update_notion_page(page_id, {
+        # Update status and uncheck restart if needed
+        updates = {
             'Research Status': {'select': {'name': 'Researching'}}
-        })
-        return jsonify({'status': 'sent_to_clay', 'firm': firm_name})
+        }
+        if is_restart:
+            updates['Restart Enrichment'] = {'checkbox': False}
+        
+        update_notion_page(page_id, updates)
+        return jsonify({'status': 'sent_to_clay', 'firm': firm_name, 'restart': is_restart})
     else:
         return jsonify({'error': 'Failed to send to Clay'}), 500
-
 
 @app.route('/webhook/enrich-person', methods=['POST'])
 def handle_enrich_person():
