@@ -373,181 +373,83 @@ def test_enrich_person(page_id):
     })
 
 
-@app.route('/webhook/clay/firm-score', methods=['POST'])
-def handle_firm_scoring():
-    """
-    Receives firm data from Clay, scores against all 6 Plinian clients using Claude,
-    and updates Notion with fit scores and qualification notes.
-    """
-    data = request.json or {}
-    
-    notion_page_id = data.get('notion_page_id')
-    firm_name = data.get('firm_name')
-    website = data.get('website')
-    
-    # Get research from query param OR body
-    firm_research = request.args.get('research', '') or data.get('firm_research', '')
-    
-    # Sanitize
-    if firm_research:
-        firm_research = str(firm_research).replace('\n', ' ').replace('\r', ' ')[:5000]
-    
-    logger.info(f"Received firm for scoring: {firm_name}, research length: {len(firm_research)}")
-    
-    # =========================================================================
-    # COMPREHENSIVE SCORING PROMPT - Based on Plinian Training Frameworks
-    # =========================================================================
-    scoring_prompt = f"""You are an expert institutional capital raising advisor for Plinian Strategies. 
-Analyze this allocator firm and score their fit for each of our 6 clients.
+scoring_prompt = f"""You are an expert institutional capital raising advisor. Analyze this allocator firm and score their fit for each of our 6 clients.
 
 FIRM INFORMATION:
 - Name: {firm_name}
 - Website: {website}
 - Research: {firm_research}
 
-=============================================================================
-SCORING INSTRUCTIONS
-=============================================================================
-For each client, evaluate the firm against the specific criteria below.
-- "Strong" = Multiple high-fit signals present, no disqualifying factors, clear alignment
-- "Moderate" = Some alignment, no hard disqualifiers, but missing key signals or unconfirmed
-- "Weak" = Minimal alignment, potential mismatches, or only tangential fit
-- "N/A" = Clear disqualifier present OR completely wrong asset class/mandate
+SCORING PHILOSOPHY:
+- Most diversified institutional allocators (pensions, E&Fs, family offices) have broad mandates that include real estate and private equity
+- Default to MODERATE fit if they have the relevant asset class allocation, even without specific sub-sector signals
+- Upgrade to STRONG if there are explicit positive signals
+- Only mark WEAK if there are mismatches or very limited allocations
+- Only mark N/A if truly incompatible (e.g., public equity only, no alternatives)
 
-Be rigorous. Most firms should NOT be "Strong" for most clients.
-If research is insufficient to evaluate, default to "Weak" or "N/A" with explanation.
+SCORE EACH CLIENT:
 
-=============================================================================
-CLIENT 1: STONERIVER - Fund III
-=============================================================================
-PRODUCT: $200M Multifamily Real Estate Fund, Southeast US, Value-Add + Development (up to 30%)
-STRUCTURE: Vertically integrated (in-house construction + property management)
-CHECK SIZE: $5M-$25M
+1. STONERIVER (Multifamily Real Estate - Southeast US, Value-Add):
+   - STRONG if: Value-add appetite, vertically integrated preference, explicit multifamily interest
+   - MODERATE if: Has real estate allocation (most diversified allocators do), invests in private RE generally
+   - WEAK if: Core-only mandate, gateway cities only, very small RE allocation
+   - N/A if: No real estate allocation at all
 
-TARGET TIERS:
-1. "Operator-Focused" Allocators: MFOs, SFOs, specialized RIAs seeking "vertically integrated" or "operator-led" deals, Sunbelt focus, prefer funds <$500M
-2. Regional Institutions: Healthcare Foundations, Hospitals, University Endowments, Community Foundations with RE/Alternatives bucket
-3. Wealth Aggregators: CIOs of large RIAs/Wealth Platforms buying on behalf of multiple HNW clients
-4. OCIO/Consultants: Senior RE leadership with defined manager research teams
+2. ASHTON GRAY (Healthcare-Anchored Retail Real Estate - Stabilized Income):
+   - STRONG if: Real estate interest, income/core+ focus, NNN or retail experience, appropriate size
+   - MODERATE if: Has real estate allocation, seeks income/yield, diversified RE exposure
+   - WEAK if: Explicitly avoids retail, development-only focus
+   - N/A if: No real estate allocation at all
 
-HIGH-FIT SIGNALS: "Vertically integrated", "Operator", "Sunbelt", "Southeast", "Migration", "Value-Add", "Opportunistic", "Middle Market", "Real Assets", multifamily/apartment investments
+3. WILLOW CREST (Inflation-Linked Structural Alpha - Long Duration):
+   - STRONG if: Real assets mandate, inflation protection interest, 10-20yr horizon tolerance, $50M+ checks
+   - MODERATE if: Has real assets/alternatives allocation, diversified institutional investor
+   - WEAK if: Short duration focus, liquidity constraints, small ticket sizes
+   - N/A if: No alternatives/real assets allocation
 
-DISQUALIFY IF: Retail without FO structure, Core-only/Stabilized-only mandate (can't tolerate 30% development), Gateway purist (NYC/SF/LA only), Distressed debt/credit hunter (equity strategy), Internal RE org doing direct sourcing, Check size >$50M
+4. ICW HOLDINGS (Global Macro-Driven Public Equities):
+   - STRONG if: Global equity mandate, macro-aware investing, risk-managed equity interest
+   - MODERATE if: Has public equity allocation, diversified portfolio approach
+   - WEAK if: Passive/index only, single region focus
+   - N/A if: Private markets only, no public equity
 
-=============================================================================
-CLIENT 2: ASHTON GRAY - AGIF
-=============================================================================
-PRODUCT: Evergreen fund of STABILIZED healthcare-anchored retail real estate
-STRUCTURE: 31 properties, 100% occupied, ~10yr WALT, 28% GP co-invest, >7% monthly distributions
-LIQUIDITY: 2-year lockup, 10% annual NAV redemption, K-1
+5. HIGHMOUNT (Sports & Entertainment Growth PE):
+   - STRONG if: Growth PE mandate, media/entertainment/sports interest, consumer/TMT focus
+   - MODERATE if: Has private equity allocation, growth equity experience, diversified PE program
+   - WEAK if: Buyout-only, very narrow sector focus excluding consumer/media
+   - N/A if: No private equity allocation
 
-CRITICAL: AGIF is NOT development. It is stabilized income with healthcare tenancy.
+6. CO-INVEST PLATFORM (Direct Private Deals - Variable):
+   - STRONG if: Direct co-invest capability, flexible mandate, fast decision process, experienced deal team
+   - MODERATE if: Has alternatives allocation, some direct investment experience
+   - WEAK if: Fund-only investor, slow IC process, needs lead sponsor
+   - N/A if: No alternatives capability
 
-TARGET TIERS:
-1. Real Estate Income/Core+ Allocators: Endowments, healthcare foundations, hospitals, insurance, pensions with income mandates
-2. Family Offices seeking income, tax efficiency, K-1, healthcare tenancy
-3. Wealth Platforms/RIAs offering income alternatives
-4. OCIOs advising on income/stable RE
+IMPORTANT GUIDANCE:
+- Pensions, endowments, foundations, and large family offices typically have BOTH real estate AND private equity allocations
+- If research shows diversified alternatives program → default to MODERATE for StoneRiver, Ashton Gray, Highmount, and Co-Invest
+- Be generous with MODERATE - these are qualified institutional allocators worth a conversation
+- Reserve WEAK/N/A for clear mismatches, not absence of specific signals
 
-HIGH-FIT SIGNALS: "Core/Core+", "Income-focused", "Yield", "Healthcare real estate", "Medical office", "Long-term leases", "WALT", "NNN", "Sunbelt", "Evergreen", "Durable income", "Defensive tenancy"
-
-DISQUALIFY IF: Gateway-only retail mandates (AGIF is Sunbelt), Development-only, Debt/credit-only, Industrial/multifamily-only, Retail individuals, <2yr liquidity needs, Excludes retail/healthcare retail, Value-add/distressed seekers, Internal RE groups
-
-=============================================================================
-CLIENT 3: WILLOW CREST - Inflation Structural Alpha
-=============================================================================
-PRODUCT: Structural alpha, inflation-linked strategy exploiting long-duration economic dislocations
-STRUCTURE: Highly proprietary IP requiring NDA, 10-20+ year horizon, potential multi-X returns
-CHECK SIZE: $50M-$200M+
-
-CRITICAL: NOT traditional real assets. Confidential macro-driven structural trade.
-
-TARGET TIERS:
-1. Endowments & Foundations: Inflation-protection, real asset, diversifying buckets; long-duration comfort
-2. SWFs & Public Pensions: Large pools of long-duration capital, specialist inflation/real asset teams
-3. Large FOs/MFOs (Institutional-Grade Only): Inflation resilience, asymmetric opportunities, CIO with macro background
-
-HIGH-FIT SIGNALS: "Inflation-linked", "Inflation protection", "Inflation-sensitive", "Real Return", "Real Assets", "Non-correlated", "Diversifying", "Long-duration capital", "Patient capital", "Opportunistic", "Special Situations", "Structural Themes", prior timber/royalties/insurance-linked allocations
-
-DISQUALIFY IF: Retail individuals, Equity-only/60-40 traditionalists, Crypto-only allocators, Consultants without discretion, Won't sign NDAs early, Short-duration/high-liquidity needs, <$50M check capacity
-
-=============================================================================
-CLIENT 4: ICW HOLDINGS - Strategic Equities
-=============================================================================
-PRODUCT: Global macro-driven, balanced, long-only equity strategy with 4 sub-portfolios
-STRUCTURE: ~11.7% returns, ~7.8% vol, monthly liquidity, 1%/10% fees
-PEDIGREE: Founded by Mark Dinner, former senior Bridgewater leader (built algorithms for Pure Alpha, All Weather)
-
-CRITICAL: PUBLIC EQUITIES, long-only, no leverage. NOT a hedge fund.
-
-TARGET TIERS:
-1. Institutions with Global Equity Mandates: Endowments, foundations, healthcare systems, sovereigns, pensions, OCIOs
-2. MFOs/SFOs valuing equity compounding with macro discipline
-3. RIAs/Wealth Platforms seeking differentiated long-only exposure
-4. OCIOs/Consultants running global equity searches
-
-HIGH-FIT SIGNALS: "Global equity", "ACWI", "Macro-aware", "Regime-aware", "Risk-managed equities", "Downside mitigation", "Inflation resilience" (equity context), "Quality", "Cash flow focus", Bridgewater familiarity/respect
-
-DISQUALIFY IF: Private-only allocators, Hedge fund-only mandates (want leverage/shorting), Single-factor/single-region only, Leverage-seeking, Retail/unstaffed FOs, Explicitly avoid macro frameworks, Index-only buyers, Daily liquidity required
-
-=============================================================================
-CLIENT 5: HIGHMOUNT - Sports & Entertainment Growth PE
-=============================================================================
-PRODUCT: Growth PE fund focused on sports & entertainment, tech-enabled media, creator economy
-STRUCTURE: Pre-launch, targeting $1B+ raise
-CHECK SIZE: $50M-$250M
-PEDIGREE: Nine-figure Dude Perfect investment (April 2024)
-
-CRITICAL: GROWTH PRIVATE EQUITY, pre-launch. NOT real assets, NOT income.
-
-TARGET TIERS:
-1. Large Institutions with PE Growth Mandates: SWFs, large pensions, insurance, endowments with PE programs
-2. Foundations/Strategic Investors with growth capital or entertainment interest
-3. Growth-Focused FOs/MFOs willing to back pre-launch funds
-4. OCIOs/Consultants with PE growth mandates
-
-HIGH-FIT SIGNALS: "Private equity growth", "Growth equity", "Sports & entertainment", "Media", "Creator economy", "Live experiences", "Tech-enabled media", "Middle market PE", "Pre-fund commitment", "Anchor investor", prior sports/media investments
-
-DISQUALIFY IF: Retail individuals, Core/income-only mandates (no growth), Traditional buyout only, <5yr horizon, Avoid sports/entertainment/media, Passive/index only, Require full track record (this is pre-launch), Consultants without discretion
-
-=============================================================================
-CLIENT 6: CO-INVEST PLATFORM
-=============================================================================
-PRODUCT: Variable deal flow - direct minority equity, structured equity, JVs, club deals across sectors
-STRUCTURE: Deal-by-deal, not a fund
-CHECK SIZE: $5M-$200M+ depending on deal
-
-CRITICAL: About CO-INVEST CAPABILITY and MANDATE FLEXIBILITY.
-
-TARGET TIERS:
-1. Direct Co-Invest Specialists: SWFs, large pensions, mega-endowments, PE platforms with co-invest teams
-2. FOs/MFOs with Direct Investing capability: $1B+ with deal teams, evergreen capital
-3. PE FoFs with co-invest arms
-4. OCIOs deploying co-invest for E&F clients
-
-HIGH-FIT SIGNALS: "Direct co-investments", "Co-invest program", "Opportunistic private", "Direct deals", "GP-adjacent", "Flexible check sizes", "Fast-track diligence", "JVs", "Structured equity", evidence of prior direct deals outside fund commitments
-
-DISQUALIFY IF: Retail/unstaffed FOs, Fund-only policy (no co-invest capability), Public markets only, Core RE or index only, Rigid IC can't do off-cycle deals, <$5M minimum capacity, Won't do quick NDAs, Require GP sponsor to participate, Daily liquidity required
-
-=============================================================================
-OUTPUT FORMAT (Return ONLY valid JSON, no markdown fences)
-=============================================================================
+Return your analysis as JSON:
 {{
     "stoneriver_fit": "Strong/Moderate/Weak/N/A",
-    "stoneriver_rationale": "2-3 sentence explanation citing specific evidence from research",
-    "ashtongray_fit": "Strong/Moderate/Weak/N/A",
-    "ashtongray_rationale": "2-3 sentence explanation citing specific evidence from research",
+    "stoneriver_rationale": "brief reason",
+    "ashtongray_fit": "Strong/Moderate/Weak/N/A", 
+    "ashtongray_rationale": "brief reason",
     "willowcrest_fit": "Strong/Moderate/Weak/N/A",
-    "willowcrest_rationale": "2-3 sentence explanation citing specific evidence from research",
+    "willowcrest_rationale": "brief reason",
     "icw_fit": "Strong/Moderate/Weak/N/A",
-    "icw_rationale": "2-3 sentence explanation citing specific evidence from research",
+    "icw_rationale": "brief reason",
     "highmount_fit": "Strong/Moderate/Weak/N/A",
-    "highmount_rationale": "2-3 sentence explanation citing specific evidence from research",
+    "highmount_rationale": "brief reason",
     "coinvest_fit": "Strong/Moderate/Weak/N/A",
-    "coinvest_rationale": "2-3 sentence explanation citing specific evidence from research",
-    "best_match": "Client name with strongest fit, or 'None' if all N/A",
-    "overall_notes": "1-2 sentence summary of allocator profile and where they fit in Plinian's universe"
-}}"""
+    "coinvest_rationale": "brief reason",
+    "best_match": "client name with strongest fit",
+    "overall_notes": "1-2 sentence summary of allocator profile and recommended approach"
+}}
+
+Return ONLY valid JSON, no markdown fences or other text."""
 
     import anthropic
     
