@@ -576,37 +576,27 @@ def handle_person_enriched():
     """
     Receives enriched person/contact data from Clay.
     Creates or updates Prospect record in Notion.
+    
+    If notion_page_id is a valid Prospect page ID, updates directly.
+    Otherwise, searches by name/company and creates if not found.
     """
     data = request.json or {}
     logger.info(f"Received enriched person: {json.dumps(data)[:500]}")
     
     # Required fields
     name = data.get('name', '').strip()
-    firm_name = data.get('firm_name', '').strip()
-    notion_firm_page_id = data.get('notion_page_id', '')
+    company_name = data.get('company_name', '').strip() or data.get('firm_name', '').strip()
+    notion_page_id = data.get('notion_page_id', '').strip()
     
     if not name:
         return jsonify({'error': 'No name provided'}), 400
     
-    # Check if prospect already exists
-    existing = query_notion_database(
-        PROSPECTS_DB,
-        {
-            'and': [
-                {'property': 'Name', 'title': {'equals': name}},
-                {'property': 'Company', 'rich_text': {'contains': firm_name}}
-            ]
-        }
-    )
+    # Build properties for update/create
+    properties = {}
     
-    # Build properties
-    properties = {
-        'Name': {'title': [{'text': {'content': name}}]},
-        'Company': {'rich_text': [{'text': {'content': firm_name}}]},
-        'Status': {'select': {'name': 'New'}}
-    }
+    # Only set Name/Company if creating new (not updating existing)
+    # We'll add these conditionally below
     
-    # Optional fields
     if data.get('email'):
         properties['Email'] = {'email': data['email']}
     
@@ -620,10 +610,6 @@ def handle_person_enriched():
     
     if data.get('phone'):
         properties['Mobile Phone'] = {'phone_number': data['phone']}
-    
-    if data.get('location'):
-        # Could add to notes or a location field
-        pass
     
     # Map organization type if provided
     org_type = data.get('organization_type', '')
@@ -643,23 +629,63 @@ def handle_person_enriched():
                 properties['Organization Type'] = {'select': {'name': notion_value}}
                 break
     
+    # CASE 1: Direct page ID provided - update that page directly
+    if notion_page_id and notion_page_id != 'test-123' and len(notion_page_id) >= 32:
+        try:
+            update_notion_page(notion_page_id, properties)
+            logger.info(f"Directly updated prospect page: {notion_page_id}")
+            return jsonify({
+                'status': 'updated',
+                'name': name,
+                'page_id': notion_page_id,
+                'method': 'direct_update'
+            })
+        except Exception as e:
+            logger.warning(f"Direct update failed for {notion_page_id}, falling back to search: {e}")
+            # Fall through to search logic
+    
+    # CASE 2: No direct page ID - search by name/company
+    existing = None
+    if name and company_name:
+        existing = query_notion_database(
+            PROSPECTS_DB,
+            {
+                'and': [
+                    {'property': 'Name', 'title': {'equals': name}},
+                    {'property': 'Company', 'rich_text': {'contains': company_name}}
+                ]
+            }
+        )
+    elif name:
+        existing = query_notion_database(
+            PROSPECTS_DB,
+            {'property': 'Name', 'title': {'equals': name}}
+        )
+    
     if existing:
-        # Update existing prospect
+        # Update existing prospect found by search
         page_id = existing[0]['id']
         update_notion_page(page_id, properties)
         return jsonify({
             'status': 'updated',
             'name': name,
-            'page_id': page_id
+            'page_id': page_id,
+            'method': 'search_update'
         })
     else:
-        # Create new prospect
+        # Create new prospect - include Name and Company
+        properties['Name'] = {'title': [{'text': {'content': name}}]}
+        if company_name:
+            properties['Company'] = {'rich_text': [{'text': {'content': company_name}}]}
+        properties['Status'] = {'select': {'name': 'New'}}
+        
         result = create_notion_page(PROSPECTS_DB, properties)
         if result:
             return jsonify({
                 'status': 'created',
                 'name': name,
-                'page_id': result.get('id')
+                'page_id': result.get('id'),
+                'method': 'created_new'
             })
         else:
             return jsonify({'error': 'Failed to create prospect'}), 500
