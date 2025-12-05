@@ -74,6 +74,10 @@ def update_notion_page(page_id, properties):
         url = f'https://api.notion.com/v1/pages/{page_id}'
         payload = {'properties': properties}
         response = requests.patch(url, headers=NOTION_HEADERS, json=payload)
+        
+        if response.status_code != 200:
+            logger.error(f"Notion API error for page {page_id}: {response.status_code} - {response.text}")
+        
         response.raise_for_status()
         logger.info(f"Updated Notion page {page_id}")
         return response.json()
